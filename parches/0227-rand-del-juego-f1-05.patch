@@ -1,0 +1,81 @@
+diff --git a/ps2xRuntime/src/lib/ps2_game_rand.h b/ps2xRuntime/src/lib/ps2_game_rand.h
+index 43fa493..728ee7c 100644
+--- a/ps2xRuntime/src/lib/ps2_game_rand.h
++++ b/ps2xRuntime/src/lib/ps2_game_rand.h
+@@ -11,17 +11,17 @@
+ // gearbox broke ~30 s into every race and the automatic gearbox skipped the broken gear (3 -> 5).
+ namespace ps2x
+ {
+-    // One rand() of the game: _impure_ptr at 0x3F8D64 points to the reent, _rand_next at + 0x58 (the ELF starts it at
+-    // 1). false (and the RAM untouched) if that state is not in the RAM.
+-    inline bool gameRand(uint8_t *ram, uint32_t ramSize, int32_t &value)
++    // One rand() of a game whose _impure_ptr (at impurePtr) points to the reent, _rand_next at + 0x58. F1 05 (patch
++    // 0227): rand() at 0x2E2168 is the same code with _impure_ptr at 0x41098C. false (and the RAM untouched) if that
++    // state is not in the RAM.
++    inline bool gameRand(uint8_t *ram, uint32_t ramSize, uint32_t impurePtr, int32_t &value)
+     {
+-        constexpr uint32_t kImpurePtr = 0x003F8D64u;
+         constexpr uint32_t kRandNext = 0x58u;
+         auto inside = [ramSize](uint32_t address) { return ramSize >= 4u && address <= ramSize - 4u; };
+-        if (ram == nullptr || !inside(kImpurePtr))
++        if (ram == nullptr || !inside(impurePtr))
+             return false;
+         uint32_t reent = 0u;
+-        std::memcpy(&reent, ram + kImpurePtr, 4);
++        std::memcpy(&reent, ram + impurePtr, 4);
+         reent &= 0x01FFFFFFu;
+         if (reent == 0u || !inside(reent + kRandNext))
+             return false;
+@@ -32,4 +32,10 @@ namespace ps2x
+         value = static_cast<int32_t>(next & 0x7FFFFFFFu);
+         return true;
+     }
++
++    // F1 06: _impure_ptr at 0x3F8D64 (the ELF starts _rand_next at 1).
++    inline bool gameRand(uint8_t *ram, uint32_t ramSize, int32_t &value)
++    {
++        return gameRand(ram, ramSize, 0x003F8D64u, value);
++    }
+ }
+diff --git a/ps2xTest/src/ps2_options_menu_tests.cpp b/ps2xTest/src/ps2_options_menu_tests.cpp
+index d6e9984..66733fb 100644
+--- a/ps2xTest/src/ps2_options_menu_tests.cpp
++++ b/ps2xTest/src/ps2_options_menu_tests.cpp
+@@ -2523,5 +2523,37 @@ void register_ps2_options_menu_tests()
+             t.IsFalse(ps2x::gameRand(small.data(), static_cast<uint32_t>(small.size()), value), "a RAM without 0x3F8D64");
+             t.IsFalse(ps2x::gameRand(nullptr, 0u, value), "no RAM");
+         });
++
++        tc.Run("gameRand with another game's _impure_ptr (F1 05: 0x41098C) reads and stores that game's state only",
++               [&](TestCase &t)
++        {
++            std::vector<uint8_t> ram(0x00500000u, 0u);
++            const uint32_t size = static_cast<uint32_t>(ram.size());
++            const uint32_t impurePtr = 0x0041098Cu, reent = 0x00410100u, seed = 1u;
++            std::memcpy(ram.data() + impurePtr, &reent, 4);
++            std::memcpy(ram.data() + reent + 0x58u, &seed, 4);
++            const int32_t expected[3] = {1103527590, 377401575, 662824084};
++            for (int i = 0; i < 3; ++i)
++            {
++                int32_t value = 0;
++                t.IsTrue(ps2x::gameRand(ram.data(), size, impurePtr, value), "F1 05's state is there");
++                t.Equals(value, expected[i], "the game's sequence from seed 1");
++            }
++            uint32_t next = 0u;
++            std::memcpy(&next, ram.data() + reent + 0x58u, 4);
++            t.Equals(next, 0x2781E494u, "the new state is stored in F1 05's reent");
++            uint32_t f106 = 0u;
++            std::memcpy(&f106, ram.data() + 0x003F8D64u, 4);
++            t.Equals(f106, 0u, "F1 06's _impure_ptr is not touched");
++
++            int32_t value = 7;
++            const uint32_t outside = 0x01FFFFF0u;
++            std::memcpy(ram.data() + impurePtr, &outside, 4);
++            const std::vector<uint8_t> pointed = ram;
++            t.IsFalse(ps2x::gameRand(ram.data(), size, impurePtr, value), "a reent outside the RAM");
++            t.Equals(value, 7, "no number");
++            t.IsTrue(ram == pointed, "the RAM is untouched");
++            t.IsFalse(ps2x::gameRand(ram.data(), size, size, value), "an _impure_ptr outside the RAM");
++        });
+     });
+ }

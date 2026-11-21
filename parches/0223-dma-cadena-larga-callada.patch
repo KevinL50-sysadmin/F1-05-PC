@@ -1,0 +1,33 @@
+diff --git a/ps2xRuntime/src/lib/ps2_memory.cpp b/ps2xRuntime/src/lib/ps2_memory.cpp
+index 4a027c5..39f034b 100644
+--- a/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -1948,14 +1948,24 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
+                                       << channelBase << " tadr=0x" << tagAddr << std::dec << std::endl;
+                     }
+                     {
+-                        // Debug (F1 06): longest chain seen per channel, to size the guard above.
++                        // Debug (F1 06): longest chain seen per channel, to size the guard above. Patch 0223 (F1 05
++                        // rendimiento T2b): only with PS2X_DMA_CADENA_LARGA=1, and as one write. Before, it was always
++                        // on and went to the unbuffered std::cerr a character at a time (one WriteFile each), on the
++                        // EE thread, dozens of times at the race start (~0.5 % of its time there).
++                        static const bool s_traceLongest = []()
++                        {
++                            const char *value = std::getenv("PS2X_DMA_CADENA_LARGA");
++                            return value != nullptr && value[0] != '\0' && value[0] != '0';
++                        }();
+                         static int s_longest[3] = {0, 0, 0};
+                         const int index = channelBase == 0x10008000u ? 0 : channelBase == 0x10009000u ? 1 : 2;
+-                        if (tagsProcessed > s_longest[index] && tagsProcessed > 1024)
++                        if (s_traceLongest && tagsProcessed > s_longest[index] && tagsProcessed > 1024)
+                         {
+                             s_longest[index] = tagsProcessed;
+-                            std::cerr << "[dma] longest chain so far: channel=0x" << std::hex << channelBase << std::dec
+-                                      << " tags=" << tagsProcessed << " bytes=" << chainBuf.size() << std::endl;
++                            char line[128];
++                            std::snprintf(line, sizeof(line), "[dma] longest chain so far: channel=0x%x tags=%d bytes=%zu\n",
++                                          static_cast<unsigned>(channelBase), tagsProcessed, chainBuf.size());
++                            std::fputs(line, stderr);
+                         }
+                     }
+                     m_ioRegisters[channelBase + 0x30] = tagAddr;

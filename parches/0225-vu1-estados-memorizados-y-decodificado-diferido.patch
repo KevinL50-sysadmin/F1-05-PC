@@ -1,0 +1,781 @@
+diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_blocks.h b/ps2xRuntime/src/lib/vu/ps2_vu1_blocks.h
+index 26b47ce..51c4fa8 100644
+--- a/ps2xRuntime/src/lib/vu/ps2_vu1_blocks.h
++++ b/ps2xRuntime/src/lib/vu/ps2_vu1_blocks.h
+@@ -76,6 +76,20 @@ namespace
+         return ((s.vfDue[d - 1u][lane >> 6] >> (lane & 63u)) & 1u) != 0u;
+     }
+ 
++    // Cycles until the last result in flight completes (0: nothing in flight).
++    inline uint32_t lastCompletion(const TimingSig &sig)
++    {
++        uint32_t last = 0u;
++        for (uint32_t d = 1; d <= 4u; ++d)
++            if ((sig.vfDue[d - 1u][0] | sig.vfDue[d - 1u][1]) != 0u || ((sig.flags >> ((d - 1u) * 2u)) & 3u) != 0u)
++                last = d;
++        for (uint32_t r = 0; r < 16u; ++r)
++            last = std::max<uint32_t>(last, std::max(sig.viPending[r], sig.viDummy[r]));
++        last = std::max<uint32_t>(last, sig.fdiv);
++        last = std::max<uint32_t>(last, std::max(sig.efu[0], sig.efu[1]));
++        return last;
++    }
++
+     class SigTable
+     {
+     public:
+@@ -90,20 +104,54 @@ namespace
+                 if (std::memcmp(&m_sigs[id], &sig, sizeof(sig)) == 0)
+                     return id;
+             m_sigs.push_back(sig);
++            m_last.push_back(lastCompletion(sig));
+             ids.push_back(static_cast<uint32_t>(m_sigs.size() - 1u));
+             return ids.back();
+         }
+         const TimingSig &get(uint32_t id) const { return m_sigs[id]; }
++        // lastCompletion of a state, worked out once when it was interned (patch 0225).
++        uint32_t last(uint32_t id) const { return m_last[id]; }
+         size_t size() const { return m_sigs.size(); }
++        // Patch 0225: the state advanceIdle left after `cycles` idle cycles from state `id`, seen before (cycles 255
++        // and up give the same: every field counts at most 255 cycles). A small direct-mapped table: a miss only
++        // means working it out again.
++        bool idleNext(uint32_t id, uint32_t cycles, uint32_t &next) const
++        {
++            const IdleEntry &e = m_idle[idleSlot(id, cycles)];
++            if (e.id != id || e.cycles != cycles)
++                return false;
++            next = e.next;
++            return true;
++        }
++        void setIdleNext(uint32_t id, uint32_t cycles, uint32_t next)
++        {
++            m_idle[idleSlot(id, cycles)] = {id, cycles, next};
++        }
+         void clear()
+         {
+             m_sigs.clear();
++            m_last.clear();
+             m_byHash.clear();
++            for (IdleEntry &e : m_idle)
++                e = IdleEntry{};
+         }
+ 
+     private:
++        struct IdleEntry
++        {
++            uint32_t id = 0u; // 0: empty (state 0 never looks here)
++            uint32_t cycles = 0u;
++            uint32_t next = 0u;
++        };
++        static constexpr uint32_t kIdleSlots = 1024u;
++        static uint32_t idleSlot(uint32_t id, uint32_t cycles)
++        {
++            return ((id * 0x9E3779B1u) ^ (cycles * 0x85EBCA6Bu)) >> 22; // 10 bits
++        }
+         std::vector<TimingSig> m_sigs;
++        std::vector<uint32_t> m_last;
+         std::unordered_map<uint64_t, std::vector<uint32_t>> m_byHash;
++        IdleEntry m_idle[kIdleSlots] = {};
+     };
+ 
+     // ---------------------------------------------------------------------------------------------------------
+@@ -1164,22 +1212,42 @@ namespace
+         return BuildResult::Ok;
+     }
+ 
+-    // Cycles until the last result in flight completes (0: nothing in flight).
+-    inline uint32_t lastCompletion(const TimingSig &sig)
++    // The values advanceIdle completes, in its order, when the next state is known already (patch 0225).
++    inline void advanceIdleValues(BlockState &st, VU1State &vu, const TimingSig &in, uint32_t cycles)
+     {
+-        uint32_t last = 0u;
+-        for (uint32_t d = 1; d <= 4u; ++d)
+-            if ((sig.vfDue[d - 1u][0] | sig.vfDue[d - 1u][1]) != 0u || ((sig.flags >> ((d - 1u) * 2u)) & 3u) != 0u)
+-                last = d;
++        for (uint32_t d = 1; d <= 4u && d <= cycles; ++d)
++            for (uint32_t word = 0; word < 2u; ++word)
++                for (uint64_t lanes = in.vfDue[d - 1u][word]; lanes != 0u; lanes &= lanes - 1u)
++                {
++                    const uint32_t lane = word * 64u + static_cast<uint32_t>(std::countr_zero(lanes));
++                    vu.vf[lane >> 2][lane & 3u] = st.pendingVf[lane >> 2][lane & 3u];
++                }
++        for (uint32_t d = 1; d <= 16u && d <= cycles; ++d)
++        {
++            if (d <= 4u)
++                for (uint32_t side = 0; side < 2u; ++side)
++                    if (((in.flags >> ((d - 1u) * 2u + side)) & 1u) != 0u)
++                        applyFlagSlot(st.flags[(st.cycle + d) & 7u][side], vu);
++            if (in.fdiv == d)
++            {
++                vu.q = st.fdivValue;
++                const uint32_t di = st.fdivDi & 0x30u;
++                vu.status = (vu.status & 0xFCFu) | di | (di << 6);
++            }
++        }
++        for (uint32_t s = 0; s < 2u; ++s)
++            if (in.efu[s] != 0u && in.efu[s] <= cycles)
++                vu.p = st.efuValue[s];
+         for (uint32_t r = 0; r < 16u; ++r)
+-            last = std::max<uint32_t>(last, std::max(sig.viPending[r], sig.viDummy[r]));
+-        last = std::max<uint32_t>(last, sig.fdiv);
+-        last = std::max<uint32_t>(last, std::max(sig.efu[0], sig.efu[1]));
+-        return last;
++            if (in.viPending[r] != 0u && in.viPending[r] <= cycles)
++                vu.vi[r] = static_cast<int16_t>(st.pendingVi[r]);
+     }
+ 
+     // Lets `cycles` cycles go by with no pair issuing (an XGKICK waiting for the previous transfer): the results due
+     // in that time complete, in order, and the timing state moves on.
++    // Patch 0225: every VU1 program ends here (some 200 000 a second in a race, nearly all with results in flight)
++    // and the same states come back, so the next state comes from SigTable::idleNext when it was worked out before:
++    // only the values complete then, without building, comparing and interning the next TimingSig.
+     inline void advanceIdle(BlockState &st, VU1State &vu, SigTable &sigs, uint32_t cycles)
+     {
+         if (cycles == 0u)
+@@ -1189,6 +1257,16 @@ namespace
+             st.cycle += cycles; // nothing in flight
+             return;
+         }
++        const uint32_t idleKey = std::min<uint32_t>(cycles, 255u);
++        const uint32_t inId = st.sig;
++        uint32_t next = 0u;
++        if (sigs.idleNext(inId, idleKey, next))
++        {
++            advanceIdleValues(st, vu, sigs.get(inId), cycles);
++            st.cycle += cycles;
++            st.sig = next;
++            return;
++        }
+         const TimingSig in = sigs.get(st.sig);
+         TimingSig out;
+         std::memset(&out, 0, sizeof(out));
+@@ -1260,6 +1338,7 @@ namespace
+         TimingSig empty;
+         std::memset(&empty, 0, sizeof(empty));
+         st.sig = std::memcmp(&out, &empty, sizeof(out)) == 0 ? 0u : sigs.intern(out);
++        sigs.setIdleNext(inId, idleKey, st.sig);
+     }
+ 
+     // Context of the pair a block is running, for the queue functions execLower calls (queueQ, queueP, queueStore,
+@@ -1959,6 +2038,7 @@ namespace
+                     engine.storage.push_back(std::make_unique<Schedule>());
+                     found = engine.storage.back().get();
+                     ++(head != nullptr ? engine.stats.rebuilt : engine.stats.built);
++                    host.prepareBuild(); // patch 0225: the decode cache and the plans up to date
+                     buildSchedule(pc, st.sig, host.buildContext(), engine.sigs, *found);
+                     found->variant = head;
+                     head = found;
+@@ -2065,7 +2145,7 @@ namespace
+                     ++transfer;
+                     host.progressXgkickOneCycle();
+                 }
+-                advanceIdle(st, vu, engine.sigs, std::max(lastCompletion(engine.sigs.get(st.sig)), transfer));
++                advanceIdle(st, vu, engine.sigs, std::max(engine.sigs.last(st.sig), transfer));
+                 st.xgkickThrough = st.cycle;
+                 return BlockRunEnd::Program;
+             }
+diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp b/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+index adea195..d852dda 100644
+--- a/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
++++ b/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+@@ -1057,8 +1057,26 @@ namespace
+         // how many there are.
+         uint64_t flagReaders[0x4000u / 8u / 64u] = {};
+         uint32_t flagReaderCount = 0u;
++        // Patch 0225: pairs that changed in the code but are not decoded yet (the owner's decode cache still holds
++        // the old ones); decoded before anything reads them (refreshStaleDecode).
++        uint64_t stale[0x4000u / 8u / 64u] = {};
++        uint32_t staleCount = 0u;
+     };
+     DecodeSnapshot s_decodeSnapshots[2];
++    // Patch 0225: interpreters whose decode cache had stale pairs when another one rebuilt it from scratch (their
++    // stale marks are gone): their cache is no longer valid. Only compared, never dereferenced.
++    std::vector<const void *> s_staleAbandoned[2];
++    inline bool takeStaleAbandoned(uint32_t unitIndex, const void *self)
++    {
++        std::vector<const void *> &list = s_staleAbandoned[unitIndex];
++        if (list.empty())
++            return false;
++        const auto it = std::find(list.begin(), list.end(), self);
++        if (it == list.end())
++            return false;
++        list.erase(it);
++        return true;
++    }
+ 
+     // Patch 0097: the lower instruction of the pair at code reads MAC or status: FSEQ, FSAND, FSOR (0x14, 0x16, 0x17)
+     // or FMEQ, FMAND, FMOR (0x18, 0x1A, 0x1B) in bits 31-25, unless the upper has the I bit (then the lower word is
+@@ -1171,6 +1189,37 @@ namespace
+         return vu1 && g_ps2AbMode.load(std::memory_order_relaxed) != 9;
+     }
+ 
++    // Patch 0225: decodes the pairs left stale (DecodeSnapshot::stale) as rebuildDecodedCodeCache did at once before:
++    // from a variant seen before, or with decode(i). A pair decodes from its own 8 bytes alone, so doing it later
++    // gives the same result.
++    template <typename Decoded, typename DecodeFn>
++    void refreshStaleDecode(DecodeSnapshot &snapshot, Decoded *cache, const uint8_t *vuCode, bool variants,
++                            DecodeFn &&decode)
++    {
++        if (snapshot.staleCount == 0u)
++            return;
++        for (uint32_t word = 0; word < sizeof(snapshot.stale) / sizeof(snapshot.stale[0]); ++word)
++        {
++            for (uint64_t bits = snapshot.stale[word]; bits != 0u; bits &= bits - 1u)
++            {
++                const uint32_t i = word * 64u + static_cast<uint32_t>(std::countr_zero(bits));
++                if (variants)
++                {
++                    uint32_t words[2];
++                    std::memcpy(words, vuCode + i * 8u, 8u);
++                    if (const auto *e = pairVariants<Decoded>().find(i, pairCode(words[0], words[1])))
++                    {
++                        cache[i] = e->decoded;
++                        continue;
++                    }
++                }
++                cache[i] = decode(i);
++            }
++            snapshot.stale[word] = 0u;
++        }
++        snapshot.staleCount = 0u;
++    }
++
+     // F1_VU1_VERIFICAR=<n> (from F1_VU1_VERIFICAR_DESDE=<s> seconds after the first VU1 run): n programs run twice
+     // from the same state, with blocks and with this interpreter alone, and the results are compared ([vu1:verificar]).
+     std::vector<std::vector<uint8_t>> *s_verifyPackets = nullptr; // packets of the run, when verifying
+@@ -2978,13 +3027,16 @@ void VU1Interpreter::rebuildDecodedCodeCache(const uint8_t *vuCode, uint32_t cod
+     // A pair decodes from its own 8 bytes alone: after a code change only the pairs that differ from the ones the
+     // cache was built from are decoded again (the game loads its microprograms over and over), and run() redoes
+     // only their plans (DecodeSnapshot::changed).
++    // Patch 0225: in a race the game swaps ~850 pairs some 900 times a second, while the block schedules (checked
++    // against the code bytes) hardly ever read the cache. The changed pairs are only marked stale here, and the
++    // snapshot takes just them; refreshStaleDecode decodes them, and run() plans them, before something reads them
++    // (a schedule built, a pair run by the interpreter loop).
+     DecodeSnapshot &snapshot = s_decodeSnapshots[m_unit == Unit::VU1 ? 1 : 0];
+     const bool incremental = m_decodedCodeCacheValid && m_cachedVuCode == vuCode && m_cachedMemory == memory &&
+                              m_cachedCodeSize == codeSize && snapshot.owner == this &&
+                              s_planTables[m_unit == Unit::VU1 ? 1 : 0].owner == this;
+     if (incremental)
+     {
+-        const bool variants = pairVariantsOn(m_unit == Unit::VU1);
+         // Patch 0078: eight pairs (64 bytes) at a time while they are unchanged (A/B mode 65: pair by pair, as before;
+         // the same pairs decode again either way).
+         const bool chunks = (g_ps2AbMode.load(std::memory_order_relaxed) != 65 && g_ps2AbMode.load(std::memory_order_relaxed) != 69);
+@@ -3007,25 +3059,25 @@ void VU1Interpreter::rebuildDecodedCodeCache(const uint8_t *vuCode, uint32_t cod
+             }
+             if (std::memcmp(snapshot.code + i * 8u, vuCode + i * 8u, 8u) == 0)
+                 continue;
+-            snapshot.changed[i >> 6] |= 1ull << (i & 63u);
++            const uint64_t bit = 1ull << (i & 63u);
++            snapshot.changed[i >> 6] |= bit;
++            std::memcpy(snapshot.code + i * 8u, vuCode + i * 8u, 8u);
+             notePairFlagReader(snapshot, i, vuCode + i * 8u);
+-            if (variants)
++            if ((snapshot.stale[i >> 6] & bit) == 0u)
+             {
+-                uint32_t words[2];
+-                std::memcpy(words, vuCode + i * 8u, 8u);
+-                if (const auto *e = pairVariants<DecodedInstructionPair>().find(i, pairCode(words[0], words[1])))
+-                {
+-                    m_decodedCodeCache[i] = e->decoded;
+-                    continue;
+-                }
++                snapshot.stale[i >> 6] |= bit;
++                ++snapshot.staleCount;
+             }
+-            m_decodedCodeCache[i] = decodeInstructionPair(vuCode, i * 8u);
+         }
+     }
+     else
+     {
+         for (uint32_t i = 0; i < pairCount; ++i)
+             m_decodedCodeCache[i] = decodeInstructionPair(vuCode, i * 8u);
++        if (snapshot.staleCount != 0u && snapshot.owner != nullptr && snapshot.owner != this)
++            s_staleAbandoned[m_unit == Unit::VU1 ? 1 : 0].push_back(snapshot.owner);
++        std::memset(snapshot.stale, 0, sizeof(snapshot.stale));
++        snapshot.staleCount = 0u;
+         std::memset(snapshot.flagReaders, 0, sizeof(snapshot.flagReaders));
+         snapshot.flagReaderCount = 0u;
+         for (uint32_t i = 0; i < pairCount; ++i)
+@@ -3033,7 +3085,8 @@ void VU1Interpreter::rebuildDecodedCodeCache(const uint8_t *vuCode, uint32_t cod
+         // The pair plans follow the cache: run() rebuilds them all before using them.
+         s_planTables[m_unit == Unit::VU1 ? 1 : 0].owner = nullptr;
+     }
+-    std::memcpy(snapshot.code, vuCode, static_cast<size_t>(pairCount) * 8u);
++    if (!incremental)
++        std::memcpy(snapshot.code, vuCode, static_cast<size_t>(pairCount) * 8u);
+     snapshot.owner = this;
+ 
+     m_cachedVuCode = vuCode;
+@@ -3056,6 +3109,8 @@ VU1Interpreter::DecodedInstructionPair VU1Interpreter::getDecodedInstructionPair
+         return decodeInstructionPair(vuCode, pc);
+ 
+     const uint64_t generation = m_unit == Unit::VU1 ? memory->getVU1CodeGeneration() : memory->getVU0CodeGeneration();
++    if (takeStaleAbandoned(m_unit == Unit::VU1 ? 1u : 0u, this))
++        m_decodedCodeCacheValid = false;
+     if (!m_decodedCodeCacheValid ||
+         m_cachedVuCode != vuCode ||
+         m_cachedMemory != memory ||
+@@ -3067,6 +3122,10 @@ VU1Interpreter::DecodedInstructionPair VU1Interpreter::getDecodedInstructionPair
+     const uint32_t pairIndex = pc / 8u;
+     if (pairIndex >= kMaxDecodedPairs)
+         return decodeInstructionPair(vuCode, pc);
++    DecodeSnapshot &snapshot = s_decodeSnapshots[m_unit == Unit::VU1 ? 1 : 0];
++    if (snapshot.owner == this)
++        refreshStaleDecode(snapshot, m_decodedCodeCache.data(), vuCode, pairVariantsOn(m_unit == Unit::VU1),
++                           [&](uint32_t i) { return decodeInstructionPair(vuCode, i * 8u); });
+     return m_decodedCodeCache[pairIndex];
+ }
+ 
+@@ -3409,12 +3468,79 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+     const PairPlan *planCache = nullptr;
+     uint32_t decodedCount = 0u;
+     uint64_t codeGeneration = 0u;
++    const uint32_t unitIndex = m_unit == Unit::VU1 ? 1u : 0u;
++    PlanTable &table = s_planTables[unitIndex];
++    DecodeSnapshot &snapshot = s_decodeSnapshots[unitIndex];
++    const bool variants = pairVariantsOn(unitIndex == 1u);
++    const auto planPair = [&](uint32_t pairIndex)
++    {
++        const DecodedInstructionPair &decoded = decodedCache[pairIndex];
++        PairVariantTable<DecodedInstructionPair>::Entry *entry = nullptr;
++        if (variants)
++        {
++            auto &table2 = pairVariants<DecodedInstructionPair>();
++            const uint64_t code = pairCode(decoded.lower, decoded.upper);
++            entry = table2.find(pairIndex, code);
++            if (entry != nullptr && entry->planned)
++            {
++                table.plans[pairIndex] = entry->plan;
++                s_pairInfos[unitIndex][pairIndex] = entry->info;
++                return;
++            }
++            if (entry == nullptr)
++            {
++                entry = &table2.add(pairIndex, code);
++                entry->decoded = decoded;
++            }
++        }
++        buildPairPlan(decoded, lowerWaits(decoded.lowerUsage), table.plans[pairIndex]);
++        describePair(decoded, table.plans[pairIndex], s_pairInfos[unitIndex][pairIndex]);
++        if (entry != nullptr)
++        {
++            entry->plan = table.plans[pairIndex];
++            entry->info = s_pairInfos[unitIndex][pairIndex];
++            entry->planned = true;
++        }
++    };
++    const auto refreshStale = [&]()
++    {
++        if (snapshot.owner != this)
++            return; // the stale marks are another interpreter's (this cache was built whole)
++        refreshStaleDecode(snapshot, m_decodedCodeCache.data(), vuCode, variants,
++                           [&](uint32_t i) { return decodeInstructionPair(vuCode, i * 8u); });
++    };
++    // The stale pairs decoded and the plans of the changed pairs (rebuildDecodedCodeCache). Every run did it here
++    // before patch 0225; now only before something reads them (pairsPending).
++    const auto refreshPairs = [&]()
++    {
++        refreshStale();
++        for (uint32_t word = 0; word < sizeof(snapshot.changed) / sizeof(snapshot.changed[0]); ++word)
++        {
++            for (uint64_t bits = snapshot.changed[word]; bits != 0u; bits &= bits - 1u)
++            {
++                const uint32_t pairIndex = word * 64u + static_cast<uint32_t>(std::countr_zero(bits));
++                if (pairIndex < decodedCount)
++                    planPair(pairIndex);
++            }
++            snapshot.changed[word] = 0u;
++        }
++    };
++    bool pairsPending = false;
++    const auto refreshIfPending = [&]()
++    {
++        if (!pairsPending)
++            return;
++        pairsPending = false;
++        refreshPairs();
++    };
+     if (memory != nullptr &&
+         ((m_unit == Unit::VU1 && vuCode == memory->getVU1Code()) ||
+          (m_unit == Unit::VU0 && vuCode == memory->getVU0Code())))
+     {
+         const uint64_t generation = m_unit == Unit::VU1 ? memory->getVU1CodeGeneration() : memory->getVU0CodeGeneration();
+         codeGeneration = generation;
++        if (takeStaleAbandoned(unitIndex, this))
++            m_decodedCodeCacheValid = false;
+         if (!m_decodedCodeCacheValid ||
+             m_cachedVuCode != vuCode ||
+             m_cachedMemory != memory ||
+@@ -3425,61 +3551,16 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+         }
+         decodedCache = m_decodedCodeCache.data();
+         decodedCount = std::min<uint32_t>(codeSize / 8u, kMaxDecodedPairs);
+-        const uint32_t unitIndex = m_unit == Unit::VU1 ? 1u : 0u;
+-        PlanTable &table = s_planTables[unitIndex];
+-        DecodeSnapshot &snapshot = s_decodeSnapshots[unitIndex];
+-        const bool variants = pairVariantsOn(unitIndex == 1u);
+-        const auto planPair = [&](uint32_t pairIndex)
+-        {
+-            const DecodedInstructionPair &decoded = decodedCache[pairIndex];
+-            PairVariantTable<DecodedInstructionPair>::Entry *entry = nullptr;
+-            if (variants)
+-            {
+-                auto &table2 = pairVariants<DecodedInstructionPair>();
+-                const uint64_t code = pairCode(decoded.lower, decoded.upper);
+-                entry = table2.find(pairIndex, code);
+-                if (entry != nullptr && entry->planned)
+-                {
+-                    table.plans[pairIndex] = entry->plan;
+-                    s_pairInfos[unitIndex][pairIndex] = entry->info;
+-                    return;
+-                }
+-                if (entry == nullptr)
+-                {
+-                    entry = &table2.add(pairIndex, code);
+-                    entry->decoded = decoded;
+-                }
+-            }
+-            buildPairPlan(decoded, lowerWaits(decoded.lowerUsage), table.plans[pairIndex]);
+-            describePair(decoded, table.plans[pairIndex], s_pairInfos[unitIndex][pairIndex]);
+-            if (entry != nullptr)
+-            {
+-                entry->plan = table.plans[pairIndex];
+-                entry->info = s_pairInfos[unitIndex][pairIndex];
+-                entry->planned = true;
+-            }
+-        };
+         if (table.owner != this)
+         {
++            refreshStale();
+             for (uint32_t pairIndex = 0; pairIndex < decodedCount; ++pairIndex)
+                 planPair(pairIndex);
+             table.owner = this;
+             std::memset(snapshot.changed, 0, sizeof(snapshot.changed));
+         }
+         else
+-        {
+-            // Only the pairs decoded again (rebuildDecodedCodeCache).
+-            for (uint32_t word = 0; word < sizeof(snapshot.changed) / sizeof(snapshot.changed[0]); ++word)
+-            {
+-                for (uint64_t bits = snapshot.changed[word]; bits != 0u; bits &= bits - 1u)
+-                {
+-                    const uint32_t pairIndex = word * 64u + static_cast<uint32_t>(std::countr_zero(bits));
+-                    if (pairIndex < decodedCount)
+-                        planPair(pairIndex);
+-                }
+-                snapshot.changed[word] = 0u;
+-            }
+-        }
++            pairsPending = true;
+         planCache = table.plans;
+     }
+     DecodedInstructionPair uncachedPair;
+@@ -3680,6 +3761,14 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+         uint64_t generation() const { return codeGeneration; }
+         const uint8_t *code() const { return codeBytes; }
+         const BuildContext &buildContext() const { return context; }
++        // Patch 0225: before a schedule is built from the decode cache and the plans (refreshIfPending).
++        void *refreshCtx = nullptr;
++        void (*refreshFn)(void *) = nullptr;
++        void prepareBuild()
++        {
++            if (refreshFn != nullptr)
++                refreshFn(refreshCtx);
++        }
+     };
+     // Patch 0171: where the blocks start the XGKICK catch-up (BlockHost::parkIdle).
+     const auto xgkickThroughAtEntry = [&]() -> uint64_t
+@@ -3928,6 +4017,8 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+         {
+             BlockHost host{*this, vuData, dataSize, gs, memory, vuCode, codeSize, codeGeneration,
+                            BuildContext{s_pairInfos[m_unit == Unit::VU1 ? 1 : 0], planCache, decodedCount, codeSize}, blocks->state};
++            host.refreshCtx = const_cast<void *>(static_cast<const void *>(&refreshIfPending));
++            host.refreshFn = [](void *p) { (*static_cast<decltype(refreshIfPending) *>(p))(); };
+             const uint64_t pairsBefore = blocks->stats.pairs;
+             const BlockRunEnd end = runBlocks(*blocks, host, budgetEnd);
+             toInterpreter(*blocks);
+@@ -3943,6 +4034,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+         }
+         if (m_state.pc + 8u > codeSize)
+             break;
++        refreshIfPending(); // patch 0225: this loop reads the decode cache and the plans
+ 
+         const DecodedInstructionPair *pair = nullptr;
+         const PairPlan *plan = nullptr;
+diff --git a/ps2xTest/src/ps2_vu1_tests.cpp b/ps2xTest/src/ps2_vu1_tests.cpp
+index 391c639..2ecd7ee 100644
+--- a/ps2xTest/src/ps2_vu1_tests.cpp
++++ b/ps2xTest/src/ps2_vu1_tests.cpp
+@@ -11,6 +11,9 @@
+ #include <cstdint>
+ #include <cstring>
+ #include <limits>
++#include <memory>
++#include <string>
++#include <utility>
+ #include <vector>
+ 
+ namespace
+@@ -1423,6 +1426,262 @@ void register_ps2_vu1_tests()
+             g_ps2AbMode.store(0);
+         });
+ 
++        tc.Run("VU1 results in flight at an XGKICK wait and at the program end, and code changes, give the same cycles, registers and packets on every run",
++               [](TestCase &t)
++        {
++            // Patch 0225 (rendimiento.md T2c/T2d): advanceIdle takes the next timing state from SigTable when it saw
++            // the transition before (from the second run on), and the pairs that change are decoded and planned only
++            // when something reads them. Repeated runs must leave what the first one left (worked out without the
++            // table), and runs after the code changed, and changed back, must run the new code; every run keeps the
++            // cycles and the GIF packets it had before the patch (checked with A/B modes 180-183 then: the same
++            // registers, cycles, data memory and packets as the code before, run by run).
++            Vu1Fixture fx;
++            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
++            std::vector<std::vector<uint8_t>> captured;
++            fx.mem.setGifPacketCallback([&](const uint8_t *packet, uint32_t sizeBytes)
++            {
++                captured.emplace_back(packet, packet + sizeBytes);
++            });
++            const uint64_t firstTag = makeGifTag(6u, GIF_FMT_IMAGE, 0u, true);
++            const uint64_t secondTag = makeGifTag(3u, GIF_FMT_IMAGE, 0u, true);
++            const auto resetData = [&]()
++            {
++                std::memset(fx.data, 0, PS2_VU1_DATA_SIZE);
++                std::memcpy(fx.data, &firstTag, sizeof(firstTag));
++                std::memcpy(fx.data + 16u * 16u, &secondTag, sizeof(secondTag));
++                for (uint32_t qw = 1; qw <= 6u; ++qw)
++                    std::memset(fx.data + qw * 16u, static_cast<int>(0x20u + qw), 16u);
++                for (uint32_t qw = 17; qw <= 19u; ++qw)
++                    std::memset(fx.data + qw * 16u, static_cast<int>(0x20u + qw), 16u);
++                const int32_t loaded = 1234;
++                std::memcpy(fx.data + 32u * 16u, &loaded, sizeof(loaded));
++            };
++            const uint32_t kEbit = 0x40000000u;
++            const uint32_t ilwX = (0x04u << 25) | (0x8u << 21) | (4u << 16) | (5u << 11); // ILW.x vi4, 0(vi5)
++            const uint32_t esqrt = makeVuLowerSpecial(0x78u, 3u, 0u, 0u, 0u);             // ESQRT P, vf3.x
++            const auto writeProgram = [&](int16_t iaddiu)
++            {
++                const uint32_t program[][2] = {
++                    {makeVuLowerSpecial(0x6Cu, 1u), kVuUpperNop},                          // 0: XGKICK qw 0
++                    {makeVuIaddiu(3u, 0u, iaddiu), makeVuUpper(0x28u, 0xFu, 2u, 1u, 5u)},  // 8: ADD vf5
++                    {makeVuLowerSpecial(0x6Cu, 2u), kVuUpperNop},                          // 16: XGKICK qw 16 (waits)
++                    {ilwX, makeVuUpper(0x2Au, 0xFu, 3u, 5u, 6u)},                          // 24: MUL vf6
++                    {makeVuDiv(1u, 2u, 0u, 1u), makeVuUpper(0x28u, 0xFu, 3u, 1u, 7u) | kEbit}, // 32: DIV, ADD vf7, E
++                    {esqrt, makeVuUpper(0x2Au, 0xFu, 3u, 2u, 8u)},                         // 40: ESQRT, MUL vf8
++                    {0u, kVuUpperNop},                                                     // 48
++                };
++                for (uint32_t i = 0; i < sizeof(program) / sizeof(program[0]); ++i)
++                    writeVuInstructionPair(fx.code, i * 8u, program[i][0], program[i][1]);
++            };
++            const float vf1[4] = {6.0f, 2.0f, 3.0f, 4.0f};
++            const float vf2[4] = {0.5f, 3.0f, 1.5f, 2.0f};
++            const float vf3[4] = {16.0f, 0.25f, 4.0f, 1.0f};
++            // Everything a run leaves that the rest of the system can see.
++            // Every run starts from the same registers (those of a new interpreter), so a value a run fails to
++            // complete cannot hide behind the one the previous run left.
++            const auto runOnce = [&](VU1Interpreter &vu1, const VU1State &initial)
++            {
++                resetData();
++                captured.clear();
++                const uint64_t keptCycles = vu1.state().cycles;
++                vu1.state() = initial;
++                vu1.state().cycles = keptCycles;
++                vu1.state().vi[1] = 0;
++                vu1.state().vi[2] = 16;
++                vu1.state().vi[5] = 32;
++                std::memcpy(vu1.state().vf[1], vf1, sizeof(vf1));
++                std::memcpy(vu1.state().vf[2], vf2, sizeof(vf2));
++                std::memcpy(vu1.state().vf[3], vf3, sizeof(vf3));
++                const uint64_t before = vu1.state().cycles;
++                vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem, 0u, 0u, 0u, 65536u);
++                const VU1State &s = vu1.state();
++                std::vector<uint8_t> out;
++                const auto put = [&](const void *p, size_t n)
++                {
++                    const auto *b = static_cast<const uint8_t *>(p);
++                    out.insert(out.end(), b, b + n);
++                };
++                const uint64_t cycles = s.cycles - before;
++                put(&cycles, sizeof(cycles));
++                put(s.vf, sizeof(s.vf));
++                put(s.vi, sizeof(s.vi));
++                put(s.acc, sizeof(s.acc));
++                put(&s.q, sizeof(s.q));
++                put(&s.p, sizeof(s.p));
++                put(&s.i, sizeof(s.i));
++                put(&s.pc, sizeof(s.pc));
++                put(&s.mac, sizeof(s.mac));
++                put(&s.clip, sizeof(s.clip));
++                put(&s.status, sizeof(s.status));
++                put(fx.data, PS2_VU1_DATA_SIZE);
++                const uint32_t packets = static_cast<uint32_t>(captured.size());
++                put(&packets, sizeof(packets));
++                for (const auto &packet : captured)
++                {
++                    const uint32_t size = static_cast<uint32_t>(packet.size());
++                    put(&size, sizeof(size));
++                    put(packet.data(), packet.size());
++                }
++                return out;
++            };
++            // Runs: the program three times, with pair 8 changed by MPG (twice), changed back, and again.
++            std::vector<std::unique_ptr<VU1Interpreter>> interpreters;
++            std::vector<VU1State> states;
++            std::vector<std::vector<std::vector<uint8_t>>> packets;
++            const auto scenario = [&]()
++            {
++                writeProgram(5);
++                fx.mem.write64(PS2_VU1_CODE_BASE + 48u, packVuInstructionPair(0u, kVuUpperNop)); // new generation
++                // Kept alive: each scenario's interpreter has its own address, so the VU1 caches keyed by owner
++                // (decode snapshot, plans, block engine) start again for it.
++                interpreters.push_back(std::make_unique<VU1Interpreter>());
++                VU1Interpreter &vu1 = *interpreters.back();
++                const VU1State initial = vu1.state();
++                std::vector<std::vector<uint8_t>> runs;
++                const auto runAndKeep = [&]()
++                {
++                    runs.push_back(runOnce(vu1, initial));
++                    states.push_back(vu1.state());
++                    packets.push_back(captured);
++                };
++                for (uint32_t run = 0; run < 3u; ++run)
++                    runAndKeep();
++                uploadVu1Mpg(fx.mem, 1u, makeVuIaddiu(3u, 0u, 9), makeVuUpper(0x28u, 0xFu, 2u, 1u, 5u));
++                runAndKeep();
++                uploadVu1Mpg(fx.mem, 1u, makeVuIaddiu(3u, 0u, 9), makeVuUpper(0x2Au, 0xFu, 2u, 1u, 5u));
++                runAndKeep();
++                // Pair 8 back as it was, with pair 0 changed too: the block at 0 is built again, from the decode of
++                // pair 8 (which must be the current one, not the MUL of the run before).
++                uploadVu1Mpg(fx.mem, 0u, makeVuLowerSpecial(0x6Cu, 1u), makeVuUpper(0x28u, 0xFu, 1u, 1u, 9u));
++                uploadVu1Mpg(fx.mem, 1u, makeVuIaddiu(3u, 0u, 5), makeVuUpper(0x28u, 0xFu, 2u, 1u, 5u));
++                for (uint32_t run = 0; run < 2u; ++run)
++                    runAndKeep();
++                return runs;
++            };
++            const auto firstDifference = [](const std::vector<uint8_t> &a, const std::vector<uint8_t> &b)
++            {
++                size_t i = 0;
++                while (i < a.size() && i < b.size() && a[i] == b[i])
++                    ++i;
++                return std::to_string(i);
++            };
++
++            const auto runs = scenario();
++            t.Equals(runs.size(), static_cast<size_t>(7u), "seven runs");
++            std::vector<uint8_t> expectedFirst(16u * 7u, 0u), expectedSecond(16u * 4u, 0u);
++            std::memcpy(expectedFirst.data(), &firstTag, sizeof(firstTag));
++            for (uint32_t qw = 1; qw <= 6u; ++qw)
++                std::memset(expectedFirst.data() + qw * 16u, static_cast<int>(0x20u + qw), 16u);
++            std::memcpy(expectedSecond.data(), &secondTag, sizeof(secondTag));
++            for (uint32_t qw = 17; qw <= 19u; ++qw)
++                std::memset(expectedSecond.data() + (qw - 16u) * 16u, static_cast<int>(0x20u + qw), 16u);
++            // Pair 8 per run: IADDIU 5 + ADD three times, IADDIU 9 + ADD, IADDIU 9 + MUL, then IADDIU 5 + ADD (with
++            // pair 0 writing vf9 too) twice.
++            const int32_t vi3[7] = {5, 5, 5, 9, 9, 5, 5};
++            const float vf5x[7] = {6.5f, 6.5f, 6.5f, 6.5f, 3.0f, 6.5f, 6.5f};
++            const float vf9x[7] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 12.0f, 12.0f};
++            for (size_t run = 0; run < runs.size() && run < states.size() && run < packets.size() && run < 7u; ++run)
++            {
++                const VU1State &s = states[run];
++                const std::string at = " (run " + std::to_string(run) + ")";
++                uint64_t cycles = 0u;
++                std::memcpy(&cycles, runs[run].data(), sizeof(cycles));
++                t.Equals(cycles, static_cast<uint64_t>(28u), "the program should take the same VU cycles" + at);
++                t.Equals(packets[run].size(), static_cast<size_t>(2u), "both PATH1 packets should be sent" + at);
++                t.IsTrue(packets[run].size() == 2u && packets[run][0] == expectedFirst && packets[run][1] == expectedSecond,
++                         "the PATH1 packets should carry their data" + at);
++                t.Equals(s.vi[3], vi3[run], "pair 8's IADDIU as the code of the run" + at);
++                t.Equals(s.vi[4], 1234, "the ILW in flight at the end should complete" + at);
++                t.IsTrue(s.q == 2.0f, "the DIV in flight at the end should complete (Q = 6 / 3)" + at);
++                t.IsTrue(s.p == 4.0f, "the ESQRT in flight at the end should complete (P = sqrt 16)" + at);
++                t.IsTrue(s.vf[5][0] == vf5x[run] && s.vf[6][0] == vf5x[run] * 16.0f,
++                         "pair 8's upper as the code of the run, and the MUL that reads it" + at);
++                t.IsTrue(s.vf[7][0] == 22.0f && s.vf[8][0] == 8.0f, "the FMAC results in flight should land" + at);
++                t.IsTrue(s.vf[9][0] == vf9x[run], "pair 0's upper as the code of the run" + at);
++            }
++            // MAC and status left out here: the blocks skip flags nothing reads (patch 0097), so the first run (before
++            // the compiled code) may leave other values, as before patch 0225.
++            const auto withoutFlags = [](std::vector<uint8_t> blob)
++            {
++                const size_t mac = 8u + sizeof(float) * 32u * 4u + 4u * 16u + 4u * 4u + 4u * 4u; // after cycles..pc
++                std::memset(blob.data() + mac, 0, 4u);      // mac
++                std::memset(blob.data() + mac + 8u, 0, 4u); // status
++                return blob;
++            };
++            if (runs.size() == 7u)
++            {
++                for (size_t run : {1u, 2u})
++                    t.IsTrue(withoutFlags(runs[0]) == withoutFlags(runs[run]),
++                             "runs of the same code should leave the same registers, data and packets (run " +
++                                 std::to_string(run) + ", first difference at byte " +
++                                 firstDifference(withoutFlags(runs[0]), withoutFlags(runs[run])) + ")");
++                t.IsTrue(withoutFlags(runs[5]) == withoutFlags(runs[6]),
++                         "runs of the same code should leave the same registers, data and packets (runs 5 and 6)");
++            }
++        });
++
++        tc.Run("a VU1 code change left undecoded is not lost when another interpreter rebuilds the cache",
++               [](TestCase &t)
++        {
++            // Patch 0225: interpreter A runs after a code change that its run never reads (the pair stays stale), B
++            // rebuilds the decode cache from scratch, and A runs the changed pair with the same code generation: it
++            // must see the new pair.
++            Vu1Fixture fx;
++            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
++            const uint32_t kEbit = 0x40000000u;
++            const auto runAll = [&]()
++            {
++                std::memset(fx.code, 0, PS2_VU1_CODE_SIZE);
++                writeVuInstructionPair(fx.code, 0u, makeVuIaddiu(3u, 0u, 5), kVuUpperNop | kEbit);
++                writeVuInstructionPair(fx.code, 8u, 0u, kVuUpperNop);
++                writeVuInstructionPair(fx.code, 400u, makeVuIaddiu(6u, 0u, 11), kVuUpperNop | kEbit);
++                writeVuInstructionPair(fx.code, 408u, 0u, kVuUpperNop);
++                fx.mem.write64(PS2_VU1_CODE_BASE + 16u, packVuInstructionPair(0u, kVuUpperNop)); // new generation
++                auto a = std::make_unique<VU1Interpreter>();
++                auto b = std::make_unique<VU1Interpreter>();
++                const auto run = [&](VU1Interpreter &vu1, uint32_t pc)
++                {
++                    vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem, pc, 0u, 0u,
++                                65536u);
++                };
++                run(*a, 0u);
++                uploadVu1Mpg(fx.mem, 50u, makeVuIaddiu(6u, 0u, 77), kVuUpperNop | kEbit);
++                run(*a, 0u);   // pair 400 changed, not read
++                run(*b, 0u);   // B: the cache built whole
++                run(*a, 400u); // A: the changed pair
++                return std::pair<int32_t, int32_t>(a->state().vi[6], b->state().vi[3]);
++            };
++            const auto result = runAll();
++            t.Equals(result.first, 77, "A should run the changed pair, not the one it had not decoded");
++            t.Equals(result.second, 5, "B should run the program");
++        });
++
++        tc.Run("a VU1 pair changed between runs is decoded before the interpreter loop runs it", [](TestCase &t)
++        {
++            // Patch 0225: with blocks off (A/B mode 3) only the interpreter loop reads the decode cache; a pair changed
++            // by an MPG upload after the last run must be decoded before that loop executes it.
++            Vu1Fixture fx;
++            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
++            const uint32_t kEbit = 0x40000000u;
++            g_ps2AbMode.store(3);
++            std::memset(fx.code, 0, PS2_VU1_CODE_SIZE);
++            writeVuInstructionPair(fx.code, 0u, makeVuIaddiu(3u, 0u, 5), kVuUpperNop | kEbit);
++            writeVuInstructionPair(fx.code, 8u, 0u, kVuUpperNop);
++            writeVuInstructionPair(fx.code, 400u, makeVuIaddiu(6u, 0u, 11), kVuUpperNop | kEbit);
++            writeVuInstructionPair(fx.code, 408u, 0u, kVuUpperNop);
++            fx.mem.write64(PS2_VU1_CODE_BASE + 16u, packVuInstructionPair(0u, kVuUpperNop)); // new generation
++            VU1Interpreter vu1;
++            const auto run = [&](uint32_t pc)
++            {
++                vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem, pc, 0u, 0u, 65536u);
++            };
++            run(0u);
++            uploadVu1Mpg(fx.mem, 50u, makeVuIaddiu(6u, 0u, 77), kVuUpperNop | kEbit);
++            run(400u);
++            g_ps2AbMode.store(0);
++            t.Equals(vu1.state().vi[6], 77, "the interpreter loop should run the changed pair");
++        });
++
+         tc.Run("synthetic Code Veronica text packet preserves black-frame PATH1 data", [](TestCase &t)
+         {
+             PS2Memory mem;

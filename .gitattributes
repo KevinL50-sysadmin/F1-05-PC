@@ -1,0 +1,2 @@
+# Keep patches and scripts byte-exact (git apply needs the original line endings).
+* -text

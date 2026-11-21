@@ -1,0 +1,233 @@
+diff --git a/ps2xRuntime/include/runtime/gs/gs_gpu_bridge.h b/ps2xRuntime/include/runtime/gs/gs_gpu_bridge.h
+index 788d873..15bbd2c 100644
+--- a/ps2xRuntime/include/runtime/gs/gs_gpu_bridge.h
++++ b/ps2xRuntime/include/runtime/gs/gs_gpu_bridge.h
+@@ -73,7 +73,7 @@ uint32_t ps2GsGpuQualityIgnoredWarnings();
+ // <exe>\cache, installed LocalAppData\F1-06\cache, development next to the runner) before creating the device; the
+ // DLL only uses it on the GPU and driver it was saved on. It is saved again when the driver's cache grew, by a thread
+ // of its own that looks every 10 s: once it stopped growing (or every minute while it keeps growing), so that a crash
+-// keeps it; and at shutdown. Always written atomically. At 4x it is ~50 MB (paraLLEl-GS precompiles its shader
++// keeps it; and at the close (ps2GsGpuSavePipelineCacheAtExit) or shutdown. Always written atomically. At 4x it is ~50 MB (paraLLEl-GS precompiles its shader
+ // variants).
+ // PS2X_GS_GPU_CACHE=0: no cache; =<file>: that file instead.
+ // The file: a 64-byte header ("PS2XVKPC", format version 1, header size, the device, the payload's size and a 64-bit
+@@ -117,6 +117,11 @@ public:
+     GSGpuDeviceIdentity DeviceIdentity() const;
+     // What became of the pipeline cache file at creation (Valid: loaded).
+     GSGpuPipelineCacheStatus PipelineCacheStatus() const;
++    // F1 05 fase 5 (T8): stops the saver thread and writes the pipeline cache now if it changed since it was loaded or
++    // last written; the device keeps running. The normal close calls it (ps2GsGpuSavePipelineCacheAtExit) because
++    // main ends with std::_Exit, which never runs this class's destructor (the other place that saves). Only the
++    // first call (or the destructor) saves; later ones do nothing. False when there is nothing to save to.
++    bool FinishPipelineCache();
+ 
+     // The quality in use (superSampling as the GPU runs it: at most its top rate).
+     GSGpuQuality Quality() const;
+@@ -177,3 +182,10 @@ uint32_t ps2GsGpuFallbackWarnings();
+ // Phase 3 (T3): the backend ps2GsCreateRequestedGpuBackend made, while it lives (null with the CPU GS). The options
+ // menu changes its quality (SetQuality) while the game runs.
+ GSGpuBackend *ps2GsActiveGpuBackend();
++
++// F1 05 fase 5 (T8): the normal close (main.cpp, after runtime.run() and before std::_Exit) saves the active backend's
++// pipeline cache if it changed (FinishPipelineCache). False without a GPU backend. That path is an orderly stop (every
++// game thread joined, whatever exit code was noted, e.g. 11 for the game's exit()). Not called on the crash paths
++// (the exception filter, the 10 s timeout of a game thread that does not stop): there the heap or the GPU thread may
++// be what failed and a DLL call could hang the close; the saver thread already kept the cache up to its last check.
++bool ps2GsGpuSavePipelineCacheAtExit();
+diff --git a/ps2xRuntime/src/lib/gs/gs_gpu_bridge.cpp b/ps2xRuntime/src/lib/gs/gs_gpu_bridge.cpp
+index 6082f07..22b32b6 100644
+--- a/ps2xRuntime/src/lib/gs/gs_gpu_bridge.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_gpu_bridge.cpp
+@@ -553,11 +553,14 @@ struct GSGpuBackend::Impl
+     // The pipeline cache (empty path: none); its payload size as loaded or last saved, and the thread writing it.
+     std::filesystem::path pipelineCacheFile;
+     GSGpuPipelineCacheStatus pipelineCacheStatus = GSGpuPipelineCacheStatus::Missing;
+-    size_t pipelineCacheSize = 0u; // the saver thread's, then the GS GPU thread's after joining it
++    size_t pipelineCacheSize = 0u; // the saver thread's, then finishPipelineCache's after joining it
+     std::thread pipelineCacheSaver;
+     std::mutex pipelineCacheMutex;
+     std::condition_variable pipelineCacheWake;
+     bool pipelineCacheStop = false;
++    // F1 05 fase 5 (T8): the last save (finishPipelineCache) runs once, from the close or from the GS GPU thread.
++    std::mutex pipelineCacheFinishMutex;
++    bool pipelineCacheFinished = false;
+ 
+     // The queue: producers append records to pending under mutex, the GS GPU thread swaps it with working.
+     std::thread worker;
+@@ -1056,30 +1059,33 @@ struct GSGpuBackend::Impl
+             std::fprintf(stderr, "[gs:traza] fin (%u paquetes)\n", trace.packetIndex);
+     }
+ 
+-    // Writes the driver's pipeline cache if its size changed since it was loaded or written (the saver thread, or the
+-    // GS GPU thread at shutdown). The copy alone takes ~60-75 ms for the ~50 MB of a 4x session: not on the GS GPU
++    // Writes the driver's pipeline cache if its size changed since it was loaded or written (the saver thread, or
++    // finishPipelineCache at the close or at shutdown). True when it wrote the file. The copy alone takes ~60-75 ms for the ~50 MB of a 4x session: not on the GS GPU
+     // thread while the game runs.
+-    void savePipelineCache()
++    bool savePipelineCache()
+     {
+         const int64_t start = nowNs();
+         const size_t size = api.get_pipeline_cache_size(context);
+         if (size == 0u || size == pipelineCacheSize)
+-            return;
++            return false;
+         size_t copied = 0u;
+         const auto *data = static_cast<const uint8_t *>(api.get_pipeline_cache(context, &copied));
+         if (data == nullptr || copied == 0u)
+-            return;
++            return false;
+         pipelineCacheSize = copied;
+         const std::vector<uint8_t> bytes =
+             ps2GsGpuEncodePipelineCache(deviceIdentity, std::vector<uint8_t>(data, data + copied));
+         const double copyMs = static_cast<double>(nowNs() - start) / 1e6;
+         std::string error;
+-        if (ps2GsGpuWriteFileAtomically(pipelineCacheFile, bytes, error))
+-            std::fprintf(stderr, "[gs:gpu] cache de pipelines guardada: %s (%.0f KB; copia %.1f ms, total %.1f ms)\n",
+-                         ps2x::pathForLog(pipelineCacheFile).c_str(), static_cast<double>(bytes.size()) / 1024.0, copyMs,
+-                         static_cast<double>(nowNs() - start) / 1e6);
+-        else
++        if (!ps2GsGpuWriteFileAtomically(pipelineCacheFile, bytes, error))
++        {
+             std::fprintf(stderr, "[gs:gpu] no se pudo guardar la cache de pipelines: %s\n", error.c_str());
++            return false;
++        }
++        std::fprintf(stderr, "[gs:gpu] cache de pipelines guardada: %s (%.0f KB; copia %.1f ms, total %.1f ms)\n",
++                     ps2x::pathForLog(pipelineCacheFile).c_str(), static_cast<double>(bytes.size()) / 1024.0, copyMs,
++                     static_cast<double>(nowNs() - start) / 1e6);
++        return true;
+     }
+ 
+     // The saver thread (see kPipelineCacheCheck), so that a crash or a killed process keeps the cache.
+@@ -1103,6 +1109,24 @@ struct GSGpuBackend::Impl
+         }
+     }
+ 
++    // Stops the saver thread and saves a last time if the cache changed (savePipelineCache), once: at the normal close
++    // (GSGpuBackend::FinishPipelineCache, with the device still running) or at shutdown on the GS GPU thread, before
++    // the context is destroyed. True when a file was written.
++    bool finishPipelineCache()
++    {
++        std::lock_guard<std::mutex> finish(pipelineCacheFinishMutex);
++        if (pipelineCacheFinished || !pipelineCacheSaver.joinable())
++            return false;
++        pipelineCacheFinished = true;
++        {
++            std::lock_guard<std::mutex> lock(pipelineCacheMutex);
++            pipelineCacheStop = true;
++        }
++        pipelineCacheWake.notify_all();
++        pipelineCacheSaver.join();
++        return savePipelineCache();
++    }
++
+     void workerLoop()
+     {
+         t_onGpuThread = true;
+@@ -1193,16 +1217,7 @@ struct GSGpuBackend::Impl
+             busyNs += static_cast<uint64_t>(end - start);
+             report(end);
+         }
+-        if (pipelineCacheSaver.joinable())
+-        {
+-            {
+-                std::lock_guard<std::mutex> lock(pipelineCacheMutex);
+-                pipelineCacheStop = true;
+-            }
+-            pipelineCacheWake.notify_all();
+-            pipelineCacheSaver.join();
+-            savePipelineCache();
+-        }
++        finishPipelineCache();
+         api.destroy(context);
+         context = nullptr;
+     }
+@@ -1387,6 +1402,17 @@ GSGpuPipelineCacheStatus GSGpuBackend::PipelineCacheStatus() const
+     return m_impl->pipelineCacheStatus;
+ }
+ 
++bool GSGpuBackend::FinishPipelineCache()
++{
++    return m_impl->finishPipelineCache();
++}
++
++bool ps2GsGpuSavePipelineCacheAtExit()
++{
++    GSGpuBackend *backend = g_activeGpuBackend.load();
++    return backend != nullptr && backend->FinishPipelineCache();
++}
++
+ GSGpuQuality GSGpuBackend::Quality() const
+ {
+     std::lock_guard<std::mutex> lock(m_impl->qualityMutex);
+diff --git a/ps2xRuntime/src/main.cpp b/ps2xRuntime/src/main.cpp
+index 5588083..36257eb 100644
+--- a/ps2xRuntime/src/main.cpp
++++ b/ps2xRuntime/src/main.cpp
+@@ -11,6 +11,7 @@
+ #include "ps2_salida.h"
+ #include "ps2_cabecera.h"
+ #include "ps2_fallo.h"
++#include "runtime/gs/gs_gpu_bridge.h" // ps2GsGpuSavePipelineCacheAtExit (fase 5 T8)
+ #include "runtime/ps2_ab.h" // g_ps2DisplayFlips: latido "pantalla" del vigilante (fallos-con-log L14)
+ #include "ps2x/iop/ps2_iso_image.h"
+ #if defined(PS2X_ENABLE_DEBUG_UI) && !defined(PLATFORM_VITA)
+@@ -790,6 +791,9 @@ int main(int argc, char *argv[])
+ #endif
+         // odd/tasks/fallos-con-log.md T2: 0 en el cierre normal; un fallo anotado (ps2_salida.h) sale con su codigo
+         // para que RecompLauncher adjunte el registro. La ultima linea del registro dice el motivo.
++        // F1 05 fase 5 (T8): std::_Exit never destroys runtime (and with it the GPU backend, whose shutdown saved the
++        // Vulkan pipeline cache): it is saved here if it changed, before the [salida] line, which stays the last.
++        ps2GsGpuSavePipelineCacheAtExit();
+         const int codigoSalida = ps2x::salida::codigo();
+         ps2x::salida::escribir(codigoSalida, ps2x::salida::motivo());
+         std::cout.flush();
+diff --git a/ps2xTest/src/ps2_gs_gpu_tests.cpp b/ps2xTest/src/ps2_gs_gpu_tests.cpp
+index b6223da..5d35e6b 100644
+--- a/ps2xTest/src/ps2_gs_gpu_tests.cpp
++++ b/ps2xTest/src/ps2_gs_gpu_tests.cpp
+@@ -967,6 +967,45 @@ void register_ps2_gs_gpu_tests()
+             t.IsTrue(second && ps2GsGpuSameDevice(second->DeviceIdentity(), saved), "saved on this device");
+         });
+ 
++        // F1 05 fase 5 (T8): main ends with std::_Exit, so the destructor never saves on a normal close.
++        tc.Run("FinishPipelineCache saves the cache while the device lives, once", [](TestCase &t)
++        {
++            ScratchDir dir;
++            const fs::path file = dir.path / "cache" / "vulkan-pipelines.bin";
++            ScopedEnvironment cache("PS2X_GS_GPU_CACHE", file.string().c_str());
++            std::unique_ptr<GSGpuBackend> backend = testGpuBackend();
++            if (!backend)
++                return;
++            std::vector<uint8_t> vram = testFrameVram(640u, 448u);
++            backend->Initialize(vram.data(), static_cast<uint32_t>(vram.size()));
++            gpuScanout(*backend, f1Request());
++            t.IsFalse(fs::exists(file), "nothing saved before the close (under the saver's 10 s)");
++
++            t.IsTrue(backend->FinishPipelineCache(), "saved at the close");
++            GSGpuDeviceIdentity saved{};
++            std::vector<uint8_t> payload;
++            const std::vector<uint8_t> bytes = readBytes(file);
++            t.IsTrue(ps2GsGpuDecodePipelineCache(bytes, nullptr, saved, payload) == GSGpuPipelineCacheStatus::Valid,
++                     "a valid file with the device still alive (" + std::to_string(bytes.size()) + " bytes)");
++            t.IsTrue(ps2GsGpuSameDevice(saved, backend->DeviceIdentity()), "saved on this device");
++
++            fs::remove(file);
++            t.IsFalse(backend->FinishPipelineCache(), "a second call does nothing");
++            gpuScanout(*backend, f1Request());
++            backend.reset();
++            t.IsFalse(fs::exists(file), "and neither does the destructor after it");
++
++            std::unique_ptr<GSGpuBackend> second = testGpuBackend();
++            t.IsTrue(second && second->PipelineCacheStatus() == GSGpuPipelineCacheStatus::Missing,
++                     "the next device finds no file");
++        });
++
++        tc.Run("without a GPU backend saving the pipeline cache at exit does nothing", [](TestCase &t)
++        {
++            t.IsTrue(ps2GsActiveGpuBackend() == nullptr, "no active GPU backend in the tests");
++            t.IsFalse(ps2GsGpuSavePipelineCacheAtExit(), "nothing to save");
++        });
++
+         tc.Run("a pipeline cache of another device is discarded and replaced", [](TestCase &t)
+         {
+             ScratchDir dir;

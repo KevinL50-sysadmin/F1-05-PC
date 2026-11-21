@@ -1,0 +1,72 @@
+diff --git a/ps2xRuntime/include/runtime/ps2_ab.h b/ps2xRuntime/include/runtime/ps2_ab.h
+index c9a8f9e..27a8953 100644
+--- a/ps2xRuntime/include/runtime/ps2_ab.h
++++ b/ps2xRuntime/include/runtime/ps2_ab.h
+@@ -106,3 +106,9 @@ extern std::atomic<uint64_t> g_ps2DisplayFlips; // DISPFB1/2 writes that changed
+ // hyper-threads) and every other thread of the process off that core, with 7 cores or more; false undoes it (the EE
+ // thread on every performance core). Returns the core index used, or -1.
+ int ps2EeOwnCore(bool own);
++
++// Patch 0224 (F1 05 rendimiento T2a): CPU time of the EE thread for the A/B windows of a game hook running on another
++// thread. ps2NoteEeThread is called once by the EE thread (GameThread) when it starts; ps2EeThreadCycles returns its
++// QueryThreadCycleTime (0 before that or outside Windows).
++void ps2NoteEeThread();
++uint64_t ps2EeThreadCycles();
+diff --git a/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp b/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
+index 0a9a065..88c80f5 100644
+--- a/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
+@@ -39,6 +39,32 @@ extern "C"
+                                                              unsigned long length);
+     __declspec(dllimport) int __stdcall SetProcessDefaultCpuSets(void *process, const unsigned long *ids,
+                                                                  unsigned long count);
++    __declspec(dllimport) int __stdcall DuplicateHandle(void *sourceProcess, void *source, void *targetProcess,
++                                                        void **target, unsigned long access, int inherit,
++                                                        unsigned long options);
++    __declspec(dllimport) int __stdcall QueryThreadCycleTime(void *thread, unsigned long long *cycles);
++}
++
++namespace
++{
++    std::atomic<void *> s_eeThread{nullptr}; // real handle of the EE thread (patch 0224)
++}
++
++void ps2NoteEeThread()
++{
++    void *handle = nullptr;
++    if (DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &handle, 0u, 0,
++                        0x00000002u /* DUPLICATE_SAME_ACCESS */) != 0)
++        s_eeThread.store(handle, std::memory_order_release);
++}
++
++uint64_t ps2EeThreadCycles()
++{
++    void *handle = s_eeThread.load(std::memory_order_acquire);
++    unsigned long long cycles = 0u;
++    if (handle != nullptr)
++        QueryThreadCycleTime(handle, &cycles);
++    return cycles;
+ }
+ 
+ namespace
+@@ -202,6 +228,8 @@ int ps2EeOwnCore(bool own)
+ bool ThreadNaming::OnEfficiencyCore() { return false; }
+ void ThreadNaming::SetCoreKind(int) {}
+ int ps2EeOwnCore(bool) { return -1; }
++void ps2NoteEeThread() {}
++uint64_t ps2EeThreadCycles() { return 0u; }
+ #endif
+ 
+ // Cores of the GS threads: as Windows decides by default. Keeping all five on the performance cores was 6 % slower
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 5b1b0ee..7ad86e9 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -3862,6 +3862,7 @@ void PS2Runtime::run()
+     std::thread gameThread([&]()
+                            {
+         ThreadNaming::SetCurrentThreadName("GameThread");
++        ps2NoteEeThread(); // patch 0224: its CPU time for the A/B windows (ps2EeThreadCycles)
+         try
+         {
+             m_eeScheduler->reset(m_memory.getRDRAM(), m_cpuContext);

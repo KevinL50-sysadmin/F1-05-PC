@@ -1,0 +1,417 @@
+diff --git a/ps2xIOP/src/emulator/core/iop_memory.cpp b/ps2xIOP/src/emulator/core/iop_memory.cpp
+index 1b623b9..d018bfc 100644
+--- a/ps2xIOP/src/emulator/core/iop_memory.cpp
++++ b/ps2xIOP/src/emulator/core/iop_memory.cpp
+@@ -187,6 +187,8 @@ namespace ps2x::iop::detail
+         trazarSpu(phys, value, 2);
+         if ((phys & 1u) == 0u && phys >= Spu2::RegBase && phys < Spu2::RegEnd)
+         {
++            if (m_attrObserver != nullptr && (phys == 0x1F90019Au || phys == 0x1F90059Au))
++                m_attrObserver(m_attrObserverContext, phys == 0x1F90059Au ? 1 : 0, value);
+             m_spu2->write16(phys, value);
+             return;
+         }
+diff --git a/ps2xIOP/src/emulator/core/iop_memory.h b/ps2xIOP/src/emulator/core/iop_memory.h
+index 5ab9576..7a5f876 100644
+--- a/ps2xIOP/src/emulator/core/iop_memory.h
++++ b/ps2xIOP/src/emulator/core/iop_memory.h
+@@ -81,6 +81,13 @@ namespace ps2x::iop::detail
+         // Patch 0221 (instrumentation only): the emulator is about to deliver the completion interrupt `irq` (0x24
+         // core 0, 0x28 core 1); it acknowledges every start of that channel so far.
+         void dmaCompletionDelivered(int irq) noexcept;
++        // Patch 0222 (PS2X_IOP_TRAZA_DMA, debugging): called on every write to a core's ATTR (0x1F90019A/0x1F90059A).
++        using AttrWriteObserver = void (*)(void *context, int core, uint16_t value);
++        void setAttrWriteObserver(AttrWriteObserver observer, void *context) noexcept
++        {
++            m_attrObserver = observer;
++            m_attrObserverContext = context;
++        }
+         // Patch 0111: word of RAM without the hardware checks (the interpreter tests every pc for an import stub).
+         [[nodiscard]] uint32_t ramWord(uint32_t phys) const noexcept
+         {
+@@ -116,6 +123,8 @@ namespace ps2x::iop::detail
+         uint32_t m_interruptControl = 1;
+         std::optional<DmaStart> m_dmaStart;
+         uint32_t m_dmaPending[2]{}; // patch 0221 (instrumentation): starts on channel 4/7 not yet delivered
++        AttrWriteObserver m_attrObserver = nullptr; // patch 0222
++        void *m_attrObserverContext = nullptr;
+         std::unique_ptr<Spu2> m_spu2; // patch 0111
+         mutable uint32_t m_ohciFrameNumber = 0;
+     };
+diff --git a/ps2xIOP/src/emulator/iop_emulator.cpp b/ps2xIOP/src/emulator/iop_emulator.cpp
+index d9e552b..367a21b 100644
+--- a/ps2xIOP/src/emulator/iop_emulator.cpp
++++ b/ps2xIOP/src/emulator/iop_emulator.cpp
+@@ -125,6 +125,21 @@ namespace ps2x::iop::detail
+             memory.spu2().setClock(&totalCycles);
+             cdvd.setClock(&totalCycles); // patch 0114
+             reset();
++            // Patch 0222: with PS2X_IOP_TRAZA_DMA, every ATTR write too ("[iop:dma] attr"), in the same line budget.
++            if (std::getenv("PS2X_IOP_TRAZA_DMA") != nullptr)
++                memory.setAttrWriteObserver(
++                    [](void *context, int core, uint16_t value)
++                    {
++                        Impl &self = *static_cast<Impl *>(context);
++                        if (self.dmaTraced())
++                            std::fprintf(stderr, "[iop:dma] attr %d=%04x c=%llu isr=%d intr=%u hilo=%d ra=%08x pc=%08x\n", core,
++                                         value, static_cast<unsigned long long>(self.totalCycles),
++                                         self.servicingDmaInterrupts ? 1 : 0, self.memory.interruptControl(),
++                                         self.kernel.currentThreadId(),
++                                         self.activeCpu != nullptr ? self.activeCpu->gpr[31] : 0u,
++                                         self.activeCpu != nullptr ? self.activeCpu->pc : 0u);
++                    },
++                    this);
+         }
+ 
+         void reset()
+@@ -152,6 +167,7 @@ namespace ps2x::iop::detail
+             servicingDmaInterrupts = false;
+             servicingGuestCallbacks = false;
+             servicingSpu2 = false;
++            pendingSpu2Irq = false;
+             callDepth = 0u;
+             secrMcCommandHandler = {};
+             secrMcDevIdHandler = {};
+@@ -220,9 +236,9 @@ namespace ps2x::iop::detail
+                 pendingDmaInterrupts[dma->irq] = due;
+                 dmaDueCycle = std::min(dmaDueCycle, due); // patch 0113
+                 if (dmaTraced())
+-                    std::fprintf(stderr, "[iop:dma] ini irq=0x%x c=%llu vence=%llu retardo=%llu hilo=%d ra=%08x pc=%08x\n", dma->irq,
++                    std::fprintf(stderr, "[iop:dma] ini irq=0x%x c=%llu vence=%llu retardo=%llu intr=%u hilo=%d ra=%08x pc=%08x\n", dma->irq,
+                                  static_cast<unsigned long long>(totalCycles), static_cast<unsigned long long>(due),
+-                                 static_cast<unsigned long long>(dma->delayCycles), kernel.currentThreadId(),
++                                 static_cast<unsigned long long>(dma->delayCycles), memory.interruptControl(), kernel.currentThreadId(),
+                                  activeCpu != nullptr ? activeCpu->gpr[31] : 0u, activeCpu != nullptr ? activeCpu->pc : 0u);
+             }
+         }
+@@ -562,9 +578,11 @@ namespace ps2x::iop::detail
+                 }
+                 if (!running)
+                     break;
+-                if (!servicingDmaInterrupts && totalCycles >= dmaDueCycle)
++                // Patch 0222: not inside CpuSuspendIntr/CpuDisableIntr nor a handler (both leave the global
++                // interrupt control at 0); the completion stays due and goes in at the first instruction after.
++                if (!servicingDmaInterrupts && totalCycles >= dmaDueCycle && memory.interruptControl() != 0u)
+                     servicePendingDmaInterrupts();
+-                if (totalCycles >= memory.spu2().nextPollCycle())
++                if (totalCycles >= memory.spu2().nextPollCycle() || (pendingSpu2Irq && memory.interruptControl() != 0u)) // patch 0222
+                     serviceSpu2();
+                 if (!servicingGuestCallbacks && !pendingGuestCallbacks.empty() &&
+                     pendingGuestCallbacks.begin()->first <= totalCycles)
+@@ -682,9 +700,9 @@ namespace ps2x::iop::detail
+             {
+                 if (!step(cpu))
+                     break;
+-                if (!servicingDmaInterrupts && !pendingDmaInterrupts.empty())
++                if (!servicingDmaInterrupts && !pendingDmaInterrupts.empty() && memory.interruptControl() != 0u) // patch 0222
+                     servicePendingDmaInterrupts();
+-                if (totalCycles >= memory.spu2().nextPollCycle())
++                if (totalCycles >= memory.spu2().nextPollCycle() || (pendingSpu2Irq && memory.interruptControl() != 0u)) // patch 0222
+                     serviceSpu2();
+                 if (!servicingGuestCallbacks && !pendingGuestCallbacks.empty())
+                     servicePendingGuestCallbacks();
+@@ -760,15 +778,25 @@ namespace ps2x::iop::detail
+ 
+         // Patch 0111: SPU2 interrupt (IRQ 9) when an IRQA is reached. LIBSD.IRX's handler acknowledges it by clearing
+         // the core's IRQ enable bit, so it is raised once per hit.
+-        void serviceSpu2()
++        // Patch 0222: the SPU2 is polled at its due cycle even with interrupts masked, and a hit is latched in
++        // pendingSpu2Irq (as IRQINFO latches it on the hardware): an ATTR/IRQA write inside the masked section
++        // reschedules the output IRQ a full period ahead, so skipping the poll there lost the hit. The latched IRQ 9 is
++        // dispatched only with interrupts enabled, or regardless of the mask when evenIfMasked (between thread slices,
++        // for liveness, as the DMA completions there).
++        void serviceSpu2(bool evenIfMasked = false)
+         {
+-            if (servicingSpu2)
++            if (totalCycles >= memory.spu2().nextPollCycle() && memory.spu2().poll())
++                pendingSpu2Irq = true;
++            if (servicingSpu2 || !pendingSpu2Irq || (!evenIfMasked && memory.interruptControl() == 0u))
+                 return;
+             servicingSpu2 = true;
++            pendingSpu2Irq = false;
+             try
+             {
+-                if (memory.spu2().poll())
+-                    (void)intrman.dispatchInterrupt(9, *this);
++                // Patch 0222: LIBSD's IRQ 9 handler acknowledges with a read-modify-write of ATTR (0x32094-0x320a0);
++                // a DMA completion handler nested in between had its clear of the DMA bits overwritten (c0e0).
++                const InterruptsMasked masked{memory};
++                (void)intrman.dispatchInterrupt(9, *this);
+             }
+             catch (...)
+             {
+@@ -778,6 +806,22 @@ namespace ps2x::iop::detail
+             servicingSpu2 = false;
+         }
+ 
++        // Patch 0222: an IOP interrupt (DMA, SPU2 IRQ 9), timer or alarm handler runs with interrupts disabled, so a DMA
++        // completion due meanwhile cannot cut into it (LIBSD's IRQ 9 handler rewrites SPU2 ATTR read-modify-write; a
++        // nested completion handler clearing the DMA bits in between was overwritten and left ATTR at c0e0 for good).
++        struct InterruptsMasked
++        {
++            IopMemory &memory;
++            const uint32_t saved;
++            explicit InterruptsMasked(IopMemory &mem) noexcept : memory(mem), saved(mem.interruptControl())
++            {
++                memory.setInterruptControl(0u);
++            }
++            ~InterruptsMasked() { memory.setInterruptControl(saved); }
++            InterruptsMasked(const InterruptsMasked &) = delete;
++            InterruptsMasked &operator=(const InterruptsMasked &) = delete;
++        };
++
+         // Not that good to use exception handling for control flow but will do for now
+         void servicePendingDmaInterrupts()
+         {
+@@ -801,13 +845,16 @@ namespace ps2x::iop::detail
+             }
+             try
+             {
++                const InterruptsMasked masked{memory}; // patch 0222: the handlers run as on the IOP, interrupts off
+                 for (const int irq : completed)
+                 {
+                     memory.dmaCompletionDelivered(irq); // patch 0221 (instrumentation)
+                     const bool handled = intrman.dispatchInterrupt(irq, *this);
+                     if (dmaTraced())
+-                        std::fprintf(stderr, "[iop:dma] fin irq=0x%x c=%llu atendida=%d hilo=%d\n", irq,
+-                                     static_cast<unsigned long long>(totalCycles), handled ? 1 : 0, kernel.currentThreadId());
++                        std::fprintf(stderr, "[iop:dma] fin irq=0x%x c=%llu atendida=%d intr=%u hilo=%d ra=%08x pc=%08x\n", irq,
++                                     static_cast<unsigned long long>(totalCycles), handled ? 1 : 0, memory.interruptControl(),
++                                     kernel.currentThreadId(), activeCpu != nullptr ? activeCpu->gpr[31] : 0u,
++                                     activeCpu != nullptr ? activeCpu->pc : 0u);
+                 }
+             }
+             catch (...)
+@@ -921,10 +968,13 @@ namespace ps2x::iop::detail
+                 {
+                     servicePendingDmaInterrupts();
+                     servicePendingGuestCallbacks();
+-                    if (totalCycles >= memory.spu2().nextPollCycle())
+-                        serviceSpu2();
+-                    timrman.serviceDue(totalCycles, *this);
+-                    kernel.serviceAlarms(totalCycles, *this); // phase 3 T7: thbase alarms
++                    if (totalCycles >= memory.spu2().nextPollCycle() || pendingSpu2Irq)
++                        serviceSpu2(true); // patch 0222: a latched IRQ 9 goes in here even if a thread left it masked
++                    {
++                        const InterruptsMasked masked{memory}; // patch 0222: timer and alarm handlers, interrupts off
++                        timrman.serviceDue(totalCycles, *this);
++                        kernel.serviceAlarms(totalCycles, *this); // phase 3 T7: thbase alarms
++                    }
+                     IopThread *next = kernel.beginNextReady(totalCycles);
+                     if (!next)
+                     {
+@@ -1085,6 +1135,7 @@ namespace ps2x::iop::detail
+         bool servicingDmaInterrupts = false;
+         bool servicingGuestCallbacks = false;
+         bool servicingSpu2 = false;
++        bool pendingSpu2Irq = false; // patch 0222: SPU2 hit latched while interrupts were masked
+         uint32_t callDepth = 0u;
+         GuestCallback secrMcCommandHandler;
+         GuestCallback secrMcDevIdHandler;
+diff --git a/ps2xTest/src/ps2_iop_tests.cpp b/ps2xTest/src/ps2_iop_tests.cpp
+index 6b6fef7..fd277c7 100644
+--- a/ps2xTest/src/ps2_iop_tests.cpp
++++ b/ps2xTest/src/ps2_iop_tests.cpp
+@@ -347,6 +347,149 @@ namespace
+ 
+         bool loaded = false;
+     };
++
++    // Patch 0222: a synthetic IRX (base 0x10000) that registers and enables a counting handler for IRQ 0x24, starts one
++    // channel-4 DMA of 1024 words (due 2048 cycles later) and then busy-waits ~12000 cycles in one of three contexts:
++    // in its start with interrupts enabled, in its start inside CpuSuspendIntr/CpuResumeIntr, or in a thbase alarm
++    // handler set 100 cycles ahead, or in the SPU2 IRQ 9 handler (core 0 ATTR bit 0x40 with the default IRQA in the
++    // output area; that handler acknowledges by clearing ATTR, then starts the DMA itself). At the end of the wait it stores the handler's call count at 0x10404, so the test
++    // sees whether the completion interrupt cut into that code.
++    // SuspendedSpu2Hit (no DMA): a counting IRQ 9 handler (acknowledges with ATTR = 0, count at 0x10418); inside
++    // CpuSuspendIntr the start sets core 0 ATTR = 0x40, busy-waits ~420000 cycles (the output-area hit falls in it),
++    // writes ATTR = 0x40 again (which reschedules the output IRQ) and stores the IRQ 9 count at 0x10404, then resumes.
++    // Patch 0222: the hit must be latched while masked and delivered after CpuResumeIntr, not lost.
++    struct SpuDmaMaskRig
++    {
++        enum class Wait
++        {
++            Enabled,
++            Suspended,
++            InAlarm,
++            InSpu2Irq,
++            SuspendedSpu2Hit
++        };
++        static constexpr uint32_t kHandlerCalls = 0x10400u;
++        static constexpr uint32_t kCallsSeenByWait = 0x10404u;
++        static constexpr uint32_t kSpu2HandlerCalls = 0x10418u;
++
++        iop_test::Host host;
++        ps2x::iop::IopSubsystem iop{host};
++
++        explicit SpuDmaMaskRig(Wait wait)
++        {
++            const auto jal = [](uint32_t target) { return 0x0C000000u | ((target >> 2u) & 0x03FFFFFFu); };
++            constexpr uint32_t kRegisterStub = 0x10114u; // intrman import table at 0x10100: 5 header words, then stubs
++            constexpr uint32_t kEnableStub = 0x1011Cu;
++            constexpr uint32_t kSuspendStub = 0x10124u;
++            constexpr uint32_t kResumeStub = 0x1012Cu;
++            constexpr uint32_t kSetAlarmStub = 0x10154u; // thbase import table at 0x10140
++            const uint32_t nop = 0u;
++            const std::vector<uint32_t> busyWait = {
++                0x340C0FA0u, 0x258CFFFFu, 0x1580FFFEu, nop,       // t4 = 4000; do t4-- while (t4 != 0)
++                0x3C0D0001u, 0x8DAE0400u, nop, 0xADAE0404u,       // [0x10404] = [0x10400]
++            };
++            std::vector<uint32_t> start = {
++                0x27BDFFE0u, 0xAFBF001Cu,                         // addiu sp, -32; sw ra, 28(sp)
++                0x24040024u, 0x24050001u, 0x3C060001u, 0x34C60200u, // RegisterIntrHandler(0x24, 1, 0x10200, 0)
++                0x00003821u, jal(kRegisterStub), nop,
++                0x24040024u, jal(kEnableStub), nop,               // EnableIntr(0x24)
++            };
++            const std::vector<uint32_t> dmaSetup = {
++                0x3C081F80u, 0x350810C0u,                         // t0 = 0x1F8010C0 (channel 4 MADR)
++                0x3C090001u, 0x35290600u, 0xAD090000u,            // MADR = 0x10600
++                0x3C090040u, 0x35290010u, 0xAD090004u,            // BCR = 64 blocks of 16 words
++                0x3C090100u, 0x35290201u,                         // t1 = 0x01000201 (CHCR start, to SPU2)
++            };
++            const auto append = [&start](const std::vector<uint32_t> &code) { start.insert(start.end(), code.begin(), code.end()); };
++            if (wait == Wait::SuspendedSpu2Hit)
++            {
++                append({0x24040009u, 0x24050001u, 0x3C060001u, 0x34C60340u, // RegisterIntrHandler(9, 1, 0x10340, 0)
++                        0x00003821u, jal(kRegisterStub), nop,
++                        0x24040009u, jal(kEnableStub), nop,                  // EnableIntr(9)
++                        0x3C040001u, 0x34840408u, jal(kSuspendStub), nop,    // CpuSuspendIntr(0x10408)
++                        0x3C0E1F90u, 0x340F0040u, 0xA5CF019Au,               // core 0 ATTR = 0x40 (IRQ enable)
++                        0x3C0C0002u, 0x358C22E0u,                            // t4 = 140000
++                        0x258CFFFFu, 0x1580FFFEu, nop,                       // do t4-- while (t4 != 0)
++                        0xA5CF019Au,                                         // ATTR = 0x40 again
++                        0x3C0D0001u, 0x8DAE0418u, nop, 0xADAE0404u,          // [0x10404] = [0x10418]
++                        0x8DA40408u, nop, jal(kResumeStub), nop,             // CpuResumeIntr([0x10408])
++                        0x8FBF001Cu, 0x00001021u, 0x27BD0020u, 0x03E00008u, nop}); // return 0
++            }
++            else if (wait == Wait::InSpu2Irq)
++            {
++                append({0x24040009u, 0x24050001u, 0x3C060001u, 0x34C602C0u, // RegisterIntrHandler(9, 1, 0x102C0, 0)
++                        0x00003821u, jal(kRegisterStub), nop,
++                        0x24040009u, jal(kEnableStub), nop,                  // EnableIntr(9)
++                        0x3C0E1F90u, 0x340F0040u, 0xA5CF019Au});             // core 0 ATTR = 0x40 (IRQ enable)
++                append({0x8FBF001Cu, 0x00001021u, 0x27BD0020u, 0x03E00008u, nop}); // return 0
++            }
++            else
++                append(dmaSetup);
++            if (wait == Wait::Suspended)
++                append({0x3C040001u, 0x34840408u, jal(kSuspendStub), nop}); // CpuSuspendIntr(0x10408)
++            // The IRQ 9 starts have already returned (InSpu2Irq: its handler starts the DMA).
++            if (wait != Wait::InSpu2Irq && wait != Wait::SuspendedSpu2Hit)
++            {
++                append({0xAD090008u});                                     // start the DMA
++                if (wait == Wait::InAlarm)
++                    append({0x3C040001u, 0x34840410u, 0x3C050001u, 0x34A50240u, // SetAlarm(0x10410, 0x10240, 0)
++                            0x00003021u, jal(kSetAlarmStub), nop});
++                else
++                    append(busyWait);
++                if (wait == Wait::Suspended)
++                    append({0x8DA40408u, nop, jal(kResumeStub), nop});      // CpuResumeIntr([0x10408])
++                append({0x8FBF001Cu, 0x00001021u, 0x27BD0020u, 0x03E00008u, nop}); // return 0
++            }
++
++            iop_test::Irx image(0x10000u, 0x800u);
++            for (size_t i = 0; i < start.size(); ++i)
++                image.words(static_cast<uint32_t>(i * 4u), {start[i]});
++            image.words(0x100u, {0x41E00000u, 0u, 0x0101u, 0x72746E69u, 0x006E616Du, // "intrman"
++                                 0x03E00008u, 0x24000004u,                          // RegisterIntrHandler
++                                 0x03E00008u, 0x24000006u,                          // EnableIntr
++                                 0x03E00008u, 0x24000011u,                          // CpuSuspendIntr
++                                 0x03E00008u, 0x24000012u,                          // CpuResumeIntr
++                                 0u, 0u});
++            image.words(0x140u, {0x41E00000u, 0u, 0x0101u, 0x61626874u, 0x00006573u, // "thbase"
++                                 0x03E00008u, 0x24000023u,                          // SetAlarm
++                                 0u, 0u});
++            image.words(0x200u, {
++                0x3C080001u, 0x8D090400u, nop,                    // calls + 1
++                0x25290001u, 0xAD090400u,
++                0x24020001u, 0x03E00008u, nop,                    // return 1
++            });
++            for (size_t i = 0; i < busyWait.size(); ++i)          // alarm handler: the wait, then return 0 (no rearm)
++                image.words(0x240u + static_cast<uint32_t>(i * 4u), {busyWait[i]});
++            image.words(0x240u + static_cast<uint32_t>(busyWait.size() * 4u), {0x00001021u, 0x03E00008u, nop});
++            std::vector<uint32_t> spu2Handler = {0x3C0E1F90u, 0xA5C0019Au}; // IRQ 9: ATTR = 0 (acknowledge)
++            spu2Handler.insert(spu2Handler.end(), dmaSetup.begin(), dmaSetup.end());
++            spu2Handler.push_back(0xAD090008u);                   // start the DMA
++            spu2Handler.insert(spu2Handler.end(), busyWait.begin(), busyWait.end());
++            spu2Handler.insert(spu2Handler.end(), {0x24020001u, 0x03E00008u, nop}); // return 1
++            for (size_t i = 0; i < spu2Handler.size(); ++i)
++                image.words(0x2C0u + static_cast<uint32_t>(i * 4u), {spu2Handler[i]});
++            image.words(0x340u, {                                 // counting IRQ 9 handler (SuspendedSpu2Hit)
++                0x3C081F90u, 0xA500019Au,                         // ATTR = 0 (acknowledge)
++                0x3C080001u, 0x8D090418u, nop,                    // IRQ 9 calls + 1
++                0x25290001u, 0xAD090418u,
++                0x24020001u, 0x03E00008u, nop,                    // return 1
++            });
++            image.words(0x404u, {0xFFFFFFFFu});                   // stays so if the wait never ran
++            image.words(0x410u, {100u, 0u});                      // alarm clock: 100 cycles
++            image.install(host);
++            loaded = iop.loadModuleBuffer(0x1000u).moduleId > 0;
++        }
++
++        [[nodiscard]] uint32_t word(uint32_t address) const
++        {
++            uint32_t value = 0xFFFFFFFFu;
++            (void)iop.readMemory(address, &value, sizeof(value));
++            return value;
++        }
++        void runIopCycles(uint64_t cycles) { iop.runEeCycles(cycles * 8u); }
++
++        bool loaded = false;
++    };
+ }
+ 
+ void register_ps2_iop_tests()
+@@ -456,6 +599,52 @@ void register_ps2_iop_tests()
+             t.Equals(rig.word(SpuDmaRig::kChcrInHandler) & SpuDmaRig::kBusy, 0u, "CHCR is free when it is delivered");
+         });
+ 
++        tc.Run("IOP SPU2 DMA: with interrupts enabled the completion cuts into running code (patch 0222)", [](TestCase &t)
++        {
++            SpuDmaMaskRig rig(SpuDmaMaskRig::Wait::Enabled);
++            t.IsTrue(rig.loaded, "the synthetic IRX loads");
++            t.Equals(rig.word(SpuDmaMaskRig::kCallsSeenByWait), 1u, "the handler ran during the wait");
++            rig.runIopCycles(20000u);
++            t.Equals(rig.word(SpuDmaMaskRig::kHandlerCalls), 1u, "exactly one completion");
++        });
++
++        tc.Run("IOP SPU2 DMA: CpuSuspendIntr holds the completion until CpuResumeIntr (patch 0222)", [](TestCase &t)
++        {
++            SpuDmaMaskRig rig(SpuDmaMaskRig::Wait::Suspended);
++            t.IsTrue(rig.loaded, "the synthetic IRX loads");
++            t.Equals(rig.word(SpuDmaMaskRig::kCallsSeenByWait), 0u, "no handler inside the suspended section");
++            rig.runIopCycles(20000u);
++            t.Equals(rig.word(SpuDmaMaskRig::kHandlerCalls), 1u, "the held completion is delivered once afterwards");
++        });
++
++        tc.Run("IOP SPU2 DMA: an alarm handler is not interrupted by the completion (patch 0222)", [](TestCase &t)
++        {
++            SpuDmaMaskRig rig(SpuDmaMaskRig::Wait::InAlarm);
++            t.IsTrue(rig.loaded, "the synthetic IRX loads");
++            rig.runIopCycles(20000u);
++            t.Equals(rig.word(SpuDmaMaskRig::kCallsSeenByWait), 0x0u, "no handler inside the alarm handler");
++            t.Equals(rig.word(SpuDmaMaskRig::kHandlerCalls), 1u, "the completion is delivered once after the alarm");
++        });
++
++        tc.Run("IOP SPU2 DMA: the SPU2 IRQ 9 handler is not interrupted by the completion (patch 0222)", [](TestCase &t)
++        {
++            SpuDmaMaskRig rig(SpuDmaMaskRig::Wait::InSpu2Irq);
++            t.IsTrue(rig.loaded, "the synthetic IRX loads");
++            rig.runIopCycles(600000u); // the output-area IRQ comes within 512 samples (393216 cycles)
++            t.Equals(rig.word(SpuDmaMaskRig::kCallsSeenByWait), 0x0u, "no handler inside the IRQ 9 handler");
++            t.Equals(rig.word(SpuDmaMaskRig::kHandlerCalls), 1u, "the completion is delivered once after it");
++        });
++
++        tc.Run("IOP SPU2 IRQ 9: a hit inside CpuSuspendIntr is latched and delivered after CpuResumeIntr (patch 0222)", [](TestCase &t)
++        {
++            SpuDmaMaskRig rig(SpuDmaMaskRig::Wait::SuspendedSpu2Hit);
++            t.IsTrue(rig.loaded, "the synthetic IRX loads");
++            t.Equals(rig.word(SpuDmaMaskRig::kCallsSeenByWait), 0u, "no IRQ 9 handler inside the suspended section");
++            rig.runIopCycles(5000u);
++            t.Equals(rig.word(SpuDmaMaskRig::kSpu2HandlerCalls), 1u,
++                     "the SPU2 hit during the masked section is delivered after resume");
++        });
++
+         tc.Run("IOP alarms: duplicates, cancel, interrupt variants and the 100-cycle minimum", [](TestCase &t)
+         {
+             ps2x::iop::detail::IopMemory memory;

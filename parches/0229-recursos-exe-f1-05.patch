@@ -1,0 +1,142 @@
+diff --git a/ps2xRuntime/CMakeLists.txt b/ps2xRuntime/CMakeLists.txt
+index 5cde996..3aa9070 100644
+--- a/ps2xRuntime/CMakeLists.txt
++++ b/ps2xRuntime/CMakeLists.txt
+@@ -437,7 +437,7 @@ add_library(ps2_runtime STATIC
+     src/lib/games_database.cpp
+ )
+ 
+-# odd/tasks/fallos-con-log.md T3a: la version del paquete (scripts/paquete/version.txt del proyecto F1 06, la misma que
++# odd/tasks/fallos-con-log.md T3a: la version del paquete (scripts/paquete/version.txt del proyecto F1 05, la misma que
+ # usa scripts/empaquetar.ps1) y el commit de git (hash corto, -dirty con cambios sin confirmar), para la cabecera del
+ # registro. Solo ps2_version.cpp recibe estos defines: cambiarlos recompila ese archivo y nada mas (un define global
+ # recompilaria las 14.000 funciones traducidas). Se leen al configurar (compilar-runner.cmd configura siempre).
+@@ -465,7 +465,7 @@ if(GIT_FOUND AND EXISTS "${PS2X_F1_RAIZ}/.git")
+         list(APPEND PS2X_VERSION_DEFINES "PS2X_VERSION_GIT=\"${PS2X_VERSION_GIT}\"")
+     endif()
+ endif()
+-message(STATUS "F1 06 version: ${PS2X_VERSION_DEFINES}")
++message(STATUS "F1 05 version: ${PS2X_VERSION_DEFINES}")
+ set_source_files_properties(src/lib/ps2_version.cpp PROPERTIES COMPILE_DEFINITIONS "${PS2X_VERSION_DEFINES}")
+ 
+ if(MSVC)
+@@ -559,12 +559,17 @@ else()
+     )
+ endif()
+ 
+-# F1 06: icon and file properties of the player's .exe (src/runner_resources.rc). The icon is made from the player's
++# F1 05: icon and file properties of the player's .exe (src/runner_resources.rc). The icon is made from the player's
+ # game data by scripts/hacer-icono.ps1 and is not in the repository: without it the .exe keeps the default icon.
+ if(WIN32 AND NOT PS2X_IS_ANDROID)
+     get_filename_component(PS2X_F1_PROJECT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../.." ABSOLUTE)
+-    set(PS2X_RUNNER_ICON "${PS2X_F1_PROJECT_DIR}/build/icono/F1-06.ico" CACHE FILEPATH
++    set(PS2X_RUNNER_ICON "${PS2X_F1_PROJECT_DIR}/build/icono/F1-05.ico" CACHE FILEPATH
+         "Icon embedded in ps2EntryRunner (GLFW_ICON); ignored if the file does not exist")
++    # Build folders configured before the F1 05 identity (odd/tasks/identidad.md T2) kept the F1 06 icon in their cache.
++    if(PS2X_RUNNER_ICON STREQUAL "${PS2X_F1_PROJECT_DIR}/build/icono/F1-06.ico")
++        set(PS2X_RUNNER_ICON "${PS2X_F1_PROJECT_DIR}/build/icono/F1-05.ico" CACHE FILEPATH
++            "Icon embedded in ps2EntryRunner (GLFW_ICON); ignored if the file does not exist" FORCE)
++    endif()
+     set(PS2X_RUNNER_RC "${CMAKE_CURRENT_SOURCE_DIR}/src/runner_resources.rc")
+     target_sources(ps2EntryRunner PRIVATE "${PS2X_RUNNER_RC}")
+     set(PS2X_RUNNER_RC_DEFINES
+diff --git a/ps2xRuntime/include/ps2_disc_setup.h b/ps2xRuntime/include/ps2_disc_setup.h
+index 9e97b68..c3f3c2b 100644
+--- a/ps2xRuntime/include/ps2_disc_setup.h
++++ b/ps2xRuntime/include/ps2_disc_setup.h
+@@ -139,7 +139,7 @@ namespace ps2x::disc
+     std::string launcherProgressFraction(uint64_t done, uint64_t total);
+     std::string launcherProgressLine(uint64_t done, uint64_t total);
+ 
+-    // F1-06.exe --extraer-iso <iso or folder> [--ventana] and --comprobar-iso <iso or folder>. Returns the exit code:
++    // F1-05.exe --extraer-iso <iso or folder> [--ventana] and --comprobar-iso <iso or folder>. Returns the exit code:
+     // 0 done (or already extracted / valid), 1 bad arguments, 2 not Formula One 05 PAL, 3 read, write or space
+     // failure, 4 cancelled. Returns -1 when args is not one of these commands. --extraer-iso without --ventana also
+     // writes launcherProgressLine lines (a first one at 0, one per hundredth, "progress 1 Game data ready" when it
+diff --git a/ps2xRuntime/include/ps2_game_identity.h b/ps2xRuntime/include/ps2_game_identity.h
+index 7a3ec1d..c9a623c 100644
+--- a/ps2xRuntime/include/ps2_game_identity.h
++++ b/ps2xRuntime/include/ps2_game_identity.h
+@@ -12,6 +12,9 @@
+ #define PS2X_GAME_SHORT_NAME "F1 05"
+ // The player's folders (Documents\My Games\F1-05, LocalAppData\F1-05), the log and photo names.
+ #define PS2X_GAME_FOLDER "F1-05"
++// The player's .exe (OriginalFilename of src/runner_resources.rc; the build target is still ps2EntryRunner, the
++// package renames it).
++#define PS2X_GAME_EXE_NAME "F1-05.exe"
+ // The disc: PAL product code and the BOOT2 file of its SYSTEM.CNF ("BOOT2 = cdrom0:\SCES_530.33;1", VMODE = PAL).
+ #define PS2X_GAME_SERIAL "SCES-53033"
+ #define PS2X_GAME_BOOT_ELF "SCES_530.33"
+@@ -19,6 +22,8 @@
+ #define PS2X_GAME_DATA_SIZE_ES "3,5 GB"
+ #define PS2X_GAME_DATA_SIZE_EN "3.5 GB"
+ 
++// src/runner_resources.rc includes this header for the macros only: the resource compiler does not read C++.
++#ifndef RC_INVOKED
+ namespace ps2x::identity
+ {
+     inline constexpr const char *kTitle = PS2X_GAME_TITLE;
+@@ -34,3 +39,4 @@ namespace ps2x::identity
+     // The log's name when the .exe's own name is unknown.
+     inline constexpr const char *kLogName = PS2X_GAME_FOLDER;
+ }
++#endif
+diff --git a/ps2xRuntime/src/main.cpp b/ps2xRuntime/src/main.cpp
+index d261de1..7ff50ea 100644
+--- a/ps2xRuntime/src/main.cpp
++++ b/ps2xRuntime/src/main.cpp
+@@ -499,18 +499,18 @@ namespace
+ }
+ 
+ // Fase 5 (T15, netplay N1; ps2_netplay.h). Besides the game's own argument (an ELF or an ISO):
+-//   F1-06.exe --anfitrion [--escuchar <address>] [--puerto N] [--red-publicas] --clave <password>
++//   F1-05.exe --anfitrion [--escuchar <address>] [--puerto N] [--red-publicas] --clave <password>
+ //       runs the game and waits for one guest on TCP port N (50650 by default, every interface unless --escuchar).
+ //       N5: the password has 8 characters or more; only guests from local, private and VPN addresses get in unless
+ //       --red-publicas or PS2X_RED_PUBLICAS=1 (red_publicas of settings.ini).
+-//   F1-06.exe --invitado <address>[:port] [--puerto N] --clave <password>
++//   F1-05.exe --invitado <address>[:port] [--puerto N] --clave <password>
+ //       does not run the game: a window that sends this PC's pad (player 1 of controls.ini) as the host's player 2.
+ // Without --clave the password comes from PS2X_RED_CLAVE. N4: --invitado without an address or a password opens the
+ // guest's form; the host can also start from the game (OPTIONS > PC OPTIONS > PC NETPLAY).
+ // Lanzamiento T1 (ps2_disc_setup.h): without data the game asks for the player's disc and copies it into data.
+-//   F1-06.exe --extraer-iso <iso or folder> [--ventana]  does only that (exit 0 done, 1 usage, 2 not the game,
++//   F1-05.exe --extraer-iso <iso or folder> [--ventana]  does only that (exit 0 done, 1 usage, 2 not the game,
+ //       3 read/write/space, 4 cancelled); --ventana shows the progress and errors as windows (the installer).
+-//   F1-06.exe --comprobar-iso <iso or folder>  only checks the disc (0 valid, 2 not).
++//   F1-05.exe --comprobar-iso <iso or folder>  only checks the disc (0 valid, 2 not).
+ int main(int argc, char *argv[])
+ {
+ #if defined(__ANDROID__)
+diff --git a/ps2xRuntime/src/runner_resources.rc b/ps2xRuntime/src/runner_resources.rc
+index 45fe146..aea21fa 100644
+--- a/ps2xRuntime/src/runner_resources.rc
++++ b/ps2xRuntime/src/runner_resources.rc
+@@ -1,7 +1,9 @@
+-// F1 06: Windows resources of ps2EntryRunner (the player's F1-06.exe): the game's icon and the file properties.
++// F1 05 (odd/tasks/identidad.md T2): Windows resources of ps2EntryRunner (the player's F1-05.exe): the game's icon
++// and the file properties. The names come from include/ps2_game_identity.h.
+ // PS2X_RUNNER_ICON (the .ico path) and PS2X_RUNNER_VERSION_* come from ps2xRuntime/CMakeLists.txt; without the icon
+ // (scripts/hacer-icono.ps1 makes it from the player's game data) the .exe keeps the default Windows icon.
+ #include <winver.h>
++#include "../include/ps2_game_identity.h"
+ 
+ #ifdef PS2X_RUNNER_ICON
+ // GLFW loads the icon named GLFW_ICON for its window class: the window and the taskbar use it too.
+@@ -21,12 +23,12 @@ BEGIN
+     BEGIN
+         BLOCK "040904B0"
+         BEGIN
+-            VALUE "FileDescription", "Formula One 06"
+-            VALUE "ProductName", "Formula One 06"
++            VALUE "FileDescription", PS2X_GAME_TITLE
++            VALUE "ProductName", PS2X_GAME_TITLE
+             VALUE "FileVersion", PS2X_RUNNER_VERSION_STRING
+             VALUE "ProductVersion", PS2X_RUNNER_VERSION_STRING
+-            VALUE "OriginalFilename", "F1-06.exe"
+-            VALUE "InternalName", "F1-06"
++            VALUE "OriginalFilename", PS2X_GAME_EXE_NAME
++            VALUE "InternalName", PS2X_GAME_FOLDER
+         END
+     END
+     BLOCK "VarFileInfo"

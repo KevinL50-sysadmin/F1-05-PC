@@ -1,0 +1,290 @@
+diff --git a/ps2xIOP/src/emulator/core/iop_memory.cpp b/ps2xIOP/src/emulator/core/iop_memory.cpp
+index 2e0606d..1b623b9 100644
+--- a/ps2xIOP/src/emulator/core/iop_memory.cpp
++++ b/ps2xIOP/src/emulator/core/iop_memory.cpp
+@@ -67,6 +67,7 @@ namespace ps2x::iop::detail
+         m_interruptMask = 0;
+         m_interruptControl = 1;
+         m_dmaStart.reset();
++        m_dmaPending[0] = m_dmaPending[1] = 0u;
+         m_spu2->reset();
+     }
+ 
+@@ -377,7 +378,18 @@ namespace ps2x::iop::detail
+             return readOhci(address);
+         const auto value = m_hardware.find(address);
+         if (value != m_hardware.end())
++        {
++            if (address == kDmaSpu0Chcr || address == kDmaSpu1Chcr)
++            {
++                // Patch 0221 (instrumentation only, the value is unchanged): CHCR read with the busy bit clear while the
++                // channel's completion interrupt is still pending (dmaLibreConAviso in the [spu2] report).
++                const int core = address == kDmaSpu1Chcr ? 1 : 0;
++                if ((value->second & kDmaStart) == 0u && m_dmaPending[core] != 0u)
++                    m_spu2->dmaStats().freeReadsWhilePending[core].fetch_add(1u, std::memory_order_relaxed);
++                return value->second;
++            }
+             return value->second;
++        }
+         switch (address)
+         {
+         case 0x1F801070u:
+@@ -434,12 +446,21 @@ namespace ps2x::iop::detail
+             madr = current->second;
+         m_spu2->dmaTransfer(secondCore ? 1 : 0, m_ram.data(), RamSize, madr,
+                             static_cast<uint32_t>(std::min<uint64_t>(transferWords * 4u, RamSize)), (value & 1u) != 0u);
++        ++m_dmaPending[secondCore ? 1 : 0]; // patch 0221 (instrumentation)
+         m_dmaStart = DmaStart{
+             secondCore ? kDmaSpu1Irq : kDmaSpu0Irq,
+             std::max<uint64_t>(transferWords * 2u, 64u),
+         };
+     }
+ 
++    void IopMemory::dmaCompletionDelivered(int irq) noexcept
++    {
++        if (irq == kDmaSpu0Irq)
++            m_dmaPending[0] = 0u;
++        else if (irq == kDmaSpu1Irq)
++            m_dmaPending[1] = 0u;
++    }
++
+     std::optional<IopMemory::DmaStart> IopMemory::takeDmaStart() noexcept
+     {
+         std::optional<DmaStart> result = m_dmaStart;
+diff --git a/ps2xIOP/src/emulator/core/iop_memory.h b/ps2xIOP/src/emulator/core/iop_memory.h
+index 8423ece..5ab9576 100644
+--- a/ps2xIOP/src/emulator/core/iop_memory.h
++++ b/ps2xIOP/src/emulator/core/iop_memory.h
+@@ -78,6 +78,9 @@ namespace ps2x::iop::detail
+ 
+         [[nodiscard]] std::optional<DmaStart> takeDmaStart() noexcept;
+         [[nodiscard]] bool hasDmaStart() const noexcept { return m_dmaStart.has_value(); }
++        // Patch 0221 (instrumentation only): the emulator is about to deliver the completion interrupt `irq` (0x24
++        // core 0, 0x28 core 1); it acknowledges every start of that channel so far.
++        void dmaCompletionDelivered(int irq) noexcept;
+         // Patch 0111: word of RAM without the hardware checks (the interpreter tests every pc for an import stub).
+         [[nodiscard]] uint32_t ramWord(uint32_t phys) const noexcept
+         {
+@@ -112,6 +115,7 @@ namespace ps2x::iop::detail
+         uint32_t m_interruptMask = 0;
+         uint32_t m_interruptControl = 1;
+         std::optional<DmaStart> m_dmaStart;
++        uint32_t m_dmaPending[2]{}; // patch 0221 (instrumentation): starts on channel 4/7 not yet delivered
+         std::unique_ptr<Spu2> m_spu2; // patch 0111
+         mutable uint32_t m_ohciFrameNumber = 0;
+     };
+diff --git a/ps2xIOP/src/emulator/core/iop_spu2.cpp b/ps2xIOP/src/emulator/core/iop_spu2.cpp
+index f3345db..9571286 100644
+--- a/ps2xIOP/src/emulator/core/iop_spu2.cpp
++++ b/ps2xIOP/src/emulator/core/iop_spu2.cpp
+@@ -1011,11 +1011,17 @@ namespace ps2x::iop::detail
+                                  reg(core, v * 0x10u + 4u), reg(core, v * 0x10u + 6u), reg(core, v * 0x10u + 8u),
+                                  (reg32(core, kVmixL) >> v) & 1u);
+                 }
+-            std::fprintf(stderr, "[spu2]   pico=%d mvol=%x/%x %x/%x mmix=%x/%x attr=%x/%x bvol=%x/%x %x/%x entrada=%u/%u picoEntrada=%d/%d\n", peak,
++            // Patch 0221: dmaPisadas / dmaLibreConAviso, cumulative (channel 4/7).
++            const DmaStats &dma = owner.m_dmaStats;
++            std::fprintf(stderr, "[spu2]   pico=%d mvol=%x/%x %x/%x mmix=%x/%x attr=%x/%x bvol=%x/%x %x/%x entrada=%u/%u picoEntrada=%d/%d "
++                                 "dmaPisadas=%llu/%llu dmaLibreConAviso=%llu/%llu\n", peak,
+                          common(0, 0), common(0, 2), common(1, 0), common(1, 2), reg(0, kMmix), reg(1, kMmix), reg(0, kAttr),
+                          reg(1, kAttr), common(0, 0xC), common(0, 0xE), common(1, 0xC), common(1, 0xE),
+                          owner.m_inputTransfers[0].exchange(0u), owner.m_inputTransfers[1].exchange(0u), inputPeak[0],
+-                         inputPeak[1]);
++                         inputPeak[1], static_cast<unsigned long long>(dma.overwrites[0].load()),
++                         static_cast<unsigned long long>(dma.overwrites[1].load()),
++                         static_cast<unsigned long long>(dma.freeReadsWhilePending[0].load()),
++                         static_cast<unsigned long long>(dma.freeReadsWhilePending[1].load()));
+             if (std::getenv("F1_SPU2_ENTRADA") != nullptr)
+             {
+                 uint32_t lead[8];
+diff --git a/ps2xIOP/src/emulator/core/iop_spu2.h b/ps2xIOP/src/emulator/core/iop_spu2.h
+index 6aafd37..712207e 100644
+--- a/ps2xIOP/src/emulator/core/iop_spu2.h
++++ b/ps2xIOP/src/emulator/core/iop_spu2.h
+@@ -49,9 +49,22 @@ namespace ps2x::iop::detail
+         [[nodiscard]] uint64_t nextPollCycle() const noexcept { return m_nextPoll; }
+         [[nodiscard]] bool poll();
+ 
++        // Patch 0221: IOP DMA channel 4/7 completion bookkeeping, cumulative for the session and printed with the 10 s
++        // [spu2] report (the IOP thread writes them, the synthesis thread prints them). overwrites: starts while that
++        // channel's completion interrupt was still pending (the new one replaces the pending one: one interrupt for two
++        // transfers); freeReadsWhilePending: CHCR read with the busy bit clear
++        // while its completion was still pending.
++        struct DmaStats
++        {
++            std::atomic<uint64_t> overwrites[2]{};
++            std::atomic<uint64_t> freeReadsWhilePending[2]{};
++        };
++        [[nodiscard]] DmaStats &dmaStats() noexcept { return m_dmaStats; }
++
+         struct Synth;
+ 
+     private:
++        DmaStats m_dmaStats;
+         struct Command
+         {
+             uint64_t sample;
+diff --git a/ps2xIOP/src/emulator/iop_emulator.cpp b/ps2xIOP/src/emulator/iop_emulator.cpp
+index 9507b7c..d9e552b 100644
+--- a/ps2xIOP/src/emulator/iop_emulator.cpp
++++ b/ps2xIOP/src/emulator/iop_emulator.cpp
+@@ -197,11 +197,49 @@ namespace ps2x::iop::detail
+                 return;
+             if (const auto dma = memory.takeDmaStart())
+             {
+-                pendingDmaInterrupts[dma->irq] = totalCycles + dma->delayCycles;
+-                dmaDueCycle = std::min(dmaDueCycle, totalCycles + dma->delayCycles); // patch 0113
++                const uint64_t due = totalCycles + dma->delayCycles;
++                // Patch 0221 (instrumentation only): a start while the channel's completion is still pending replaces
++                // it (one interrupt for two transfers). Counted (dmaPisadas in the [spu2] report) and reported,
++                // rate-limited: the first 20, then every 1000th.
++                if (const auto previous = pendingDmaInterrupts.find(dma->irq); previous != pendingDmaInterrupts.end())
++                {
++                    const uint64_t previousDue = previous->second;
++                    const int core = dma->irq == 0x28 ? 1 : 0;
++                    const uint64_t count =
++                        memory.spu2().dmaStats().overwrites[core].fetch_add(1u, std::memory_order_relaxed) + 1u;
++                    if (count <= 20u || count % 1000u == 0u)
++                        std::fprintf(stderr,
++                                     "[iop:dma] pisada canal=%d irq=0x%x n=%llu ciclo=%llu pendiente=%llu (faltaban %lld) "
++                                     "nueva=%llu\n",
++                                     core == 1 ? 7 : 4, dma->irq, static_cast<unsigned long long>(count),
++                                     static_cast<unsigned long long>(totalCycles),
++                                     static_cast<unsigned long long>(previousDue),
++                                     static_cast<long long>(previousDue) - static_cast<long long>(totalCycles),
++                                     static_cast<unsigned long long>(due));
++                }
++                pendingDmaInterrupts[dma->irq] = due;
++                dmaDueCycle = std::min(dmaDueCycle, due); // patch 0113
++                if (dmaTraced())
++                    std::fprintf(stderr, "[iop:dma] ini irq=0x%x c=%llu vence=%llu retardo=%llu hilo=%d ra=%08x pc=%08x\n", dma->irq,
++                                 static_cast<unsigned long long>(totalCycles), static_cast<unsigned long long>(due),
++                                 static_cast<unsigned long long>(dma->delayCycles), kernel.currentThreadId(),
++                                 activeCpu != nullptr ? activeCpu->gpr[31] : 0u, activeCpu != nullptr ? activeCpu->pc : 0u);
+             }
+         }
+ 
++        // Patch 0221: PS2X_IOP_TRAZA_DMA=<second> (debugging): from that second of the IOP clock, one "[iop:dma]" line per
++        // start (ini) and completion (fin) of the SPU2 DMA channels 4/7, at most 400.000 lines.
++        bool dmaTraced() const
++        {
++            static const uint64_t s_from = []
++            {
++                const char *value = std::getenv("PS2X_IOP_TRAZA_DMA");
++                return value != nullptr ? static_cast<uint64_t>(std::max(0, std::atoi(value))) * 36864000ull : UINT64_MAX;
++            }();
++            static uint32_t s_lines = 0u;
++            return totalCycles >= s_from && s_lines++ < 400000u;
++        }
++
+         bool readRam(uint32_t address, void *destination, size_t size) const
+         {
+             return memory.readRam(address, destination, size);
+@@ -764,7 +802,13 @@ namespace ps2x::iop::detail
+             try
+             {
+                 for (const int irq : completed)
+-                    (void)intrman.dispatchInterrupt(irq, *this);
++                {
++                    memory.dmaCompletionDelivered(irq); // patch 0221 (instrumentation)
++                    const bool handled = intrman.dispatchInterrupt(irq, *this);
++                    if (dmaTraced())
++                        std::fprintf(stderr, "[iop:dma] fin irq=0x%x c=%llu atendida=%d hilo=%d\n", irq,
++                                     static_cast<unsigned long long>(totalCycles), handled ? 1 : 0, kernel.currentThreadId());
++                }
+             }
+             catch (...)
+             {
+diff --git a/ps2xTest/src/ps2_iop_tests.cpp b/ps2xTest/src/ps2_iop_tests.cpp
+index 9540df6..6b6fef7 100644
+--- a/ps2xTest/src/ps2_iop_tests.cpp
++++ b/ps2xTest/src/ps2_iop_tests.cpp
+@@ -283,6 +283,70 @@ namespace
+ 
+         [[nodiscard]] std::string lastLog() const { return host.logs.empty() ? std::string() : host.logs.back(); }
+     };
++
++    // Patch 0221: a synthetic IRX (base 0x10000) whose start registers and enables a handler for IRQ 0x24 (SPU2 core 0
++    // DMA, channel 4) and starts `starts` (1 or 2) DMAs of 1024 words (2048 cycles each) on channel 4, back to back.
++    // It stores CHCR right after each start at 0x10300/0x10304. The handler counts its calls at 0x10310 and stores the
++    // CHCR it sees at 0x10320 + 4 * call.
++    struct SpuDmaRig
++    {
++        static constexpr uint32_t kChcrAfterStart = 0x10300u;
++        static constexpr uint32_t kHandlerCalls = 0x10310u;
++        static constexpr uint32_t kChcrInHandler = 0x10320u;
++        static constexpr uint32_t kBusy = 1u << 24u;
++
++        iop_test::Host host;
++        ps2x::iop::IopSubsystem iop{host};
++
++        explicit SpuDmaRig(uint32_t starts)
++        {
++            const auto jal = [](uint32_t target) { return 0x0C000000u | ((target >> 2u) & 0x03FFFFFFu); };
++            constexpr uint32_t kRegisterStub = 0x101D4u; // import table at 0x101C0: 5 header words, then the stubs
++            constexpr uint32_t kEnableStub = 0x101DCu;
++            const uint32_t nop = 0u;
++            const uint32_t startDma = 0xAD090008u;  // sw t1, 8(t0): CHCR = start, to SPU2
++            const uint32_t readChcr = 0x8D0A0008u;  // lw t2, 8(t0)
++            iop_test::Irx image;
++            image.words(0x0u, {
++                0x27BDFFE0u, 0xAFBF001Cu,                         // addiu sp, -32; sw ra, 28(sp)
++                0x24040024u, 0x24050001u, 0x3C060001u, 0x34C60200u, // RegisterIntrHandler(0x24, 1, 0x10200, 0)
++                0x00003821u, jal(kRegisterStub), nop,
++                0x24040024u, jal(kEnableStub), nop,               // EnableIntr(0x24)
++                0x3C081F80u, 0x350810C0u,                         // t0 = 0x1F8010C0 (channel 4 MADR)
++                0x3C090001u, 0x35290400u, 0xAD090000u,            // MADR = 0x10400
++                0x3C090040u, 0x35290010u, 0xAD090004u,            // BCR = 64 blocks of 16 words
++                0x3C090100u, 0x35290201u,                         // t1 = 0x01000201 (CHCR start, to SPU2)
++                0x3C0B0001u,                                      // t3 = 0x10000
++                startDma, readChcr, nop, 0xAD6A0300u,             // start; [0x10300] = CHCR
++            });
++            image.words(0x70u, starts > 1u ? std::initializer_list<uint32_t>{startDma, readChcr, nop, 0xAD6A0304u}
++                                           : std::initializer_list<uint32_t>{nop, nop, nop, nop});
++            image.words(0x80u, {0x8FBF001Cu, 0x00001021u, 0x27BD0020u, 0x03E00008u, nop}); // return 0
++            image.words(0x1C0u, {0x41E00000u, 0u, 0x0101u, 0x72746E69u, 0x006E616Du, // "intrman"
++                                 0x03E00008u, 0x24000004u,                          // RegisterIntrHandler
++                                 0x03E00008u, 0x24000006u,                          // EnableIntr
++                                 0u, 0u});
++            image.words(0x200u, {
++                0x3C080001u, 0x8D090310u, nop,                    // t1 = calls
++                0x3C0A1F80u, 0x8D4B10C8u, nop,                    // t3 = CHCR (channel 4)
++                0x00096080u, 0x01886021u, 0xAD8B0320u,            // [0x10320 + 4 * calls] = CHCR
++                0x25290001u, 0xAD090310u,                         // calls + 1
++                0x24020001u, 0x03E00008u, nop,                    // return 1
++            });
++            image.install(host);
++            loaded = iop.loadModuleBuffer(0x1000u).moduleId > 0;
++        }
++
++        [[nodiscard]] uint32_t word(uint32_t address) const
++        {
++            uint32_t value = 0xFFFFFFFFu;
++            (void)iop.readMemory(address, &value, sizeof(value));
++            return value;
++        }
++        void runIopCycles(uint64_t cycles) { iop.runEeCycles(cycles * 8u); }
++
++        bool loaded = false;
++    };
+ }
+ 
+ void register_ps2_iop_tests()
+@@ -381,6 +445,17 @@ void register_ps2_iop_tests()
+             t.Equals(kernel.nextAlarmCycle(UINT64_MAX), UINT64_MAX, "a zero result ends the alarm");
+         });
+ 
++        tc.Run("IOP SPU2 DMA: one start gives one completion after the transfer time (patch 0221)", [](TestCase &t)
++        {
++            SpuDmaRig rig(1u);
++            t.IsTrue(rig.loaded, "the synthetic IRX loads");
++            rig.runIopCycles(1500u);
++            t.Equals(rig.word(SpuDmaRig::kHandlerCalls), 0u, "1024 words take 2048 cycles: no completion yet");
++            rig.runIopCycles(20000u);
++            t.Equals(rig.word(SpuDmaRig::kHandlerCalls), 1u, "exactly one completion");
++            t.Equals(rig.word(SpuDmaRig::kChcrInHandler) & SpuDmaRig::kBusy, 0u, "CHCR is free when it is delivered");
++        });
++
+         tc.Run("IOP alarms: duplicates, cancel, interrupt variants and the 100-cycle minimum", [](TestCase &t)
+         {
+             ps2x::iop::detail::IopMemory memory;

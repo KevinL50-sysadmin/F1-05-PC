@@ -1,0 +1,94 @@
+diff --git a/ps2xIOP/src/emulator/imports/iop_cdvd.cpp b/ps2xIOP/src/emulator/imports/iop_cdvd.cpp
+index baeea77..fe36aad 100644
+--- a/ps2xIOP/src/emulator/imports/iop_cdvd.cpp
++++ b/ps2xIOP/src/emulator/imports/iop_cdvd.cpp
+@@ -315,6 +315,7 @@ namespace ps2x::iop::detail
+                             callback.address,
+                             callback.gp,
+                             kCdvdCallbackRead,
++                            busyUntil, // patch 0220: delivered once sceCdSync(1) says done
+                         };
+                     }
+                     cpu.gpr[2] = 1u;
+@@ -333,6 +334,7 @@ namespace ps2x::iop::detail
+                         callback.address,
+                         callback.gp,
+                         kCdvdCallbackSeek,
++                        busyUntil, // patch 0220
+                     };
+                 }
+                 cpu.gpr[2] = 1u;
+diff --git a/ps2xIOP/src/emulator/imports/iop_cdvd.h b/ps2xIOP/src/emulator/imports/iop_cdvd.h
+index bc2b42f..d5af046 100644
+--- a/ps2xIOP/src/emulator/imports/iop_cdvd.h
++++ b/ps2xIOP/src/emulator/imports/iop_cdvd.h
+@@ -23,6 +23,9 @@ namespace ps2x::iop::detail
+             uint32_t address = 0u;
+             uint32_t gp = 0u;
+             uint32_t reason = 0u;
++            // Patch 0220: IOP cycle from which sceCdSync(1) no longer reports busy (0 = not busy). The emulator never
++            // delivers the callback before it, so a reader woken by the callback never sees its read still busy.
++            uint64_t notBusyFrom = 0u;
+         };
+ 
+         IopCdvd(IopHost &host, IopMemory &memory, IopKernel &kernel);
+diff --git a/ps2xIOP/src/emulator/iop_emulator.cpp b/ps2xIOP/src/emulator/iop_emulator.cpp
+index 750e396..9507b7c 100644
+--- a/ps2xIOP/src/emulator/iop_emulator.cpp
++++ b/ps2xIOP/src/emulator/iop_emulator.cpp
+@@ -304,8 +304,11 @@ namespace ps2x::iop::detail
+             {
+                 if (const auto callback = cdvd.takeCompletionCallback())
+                 {
++                    // Patch 0220: never before the read stops being busy (patch 0114). CORE.IRX's reader, woken by
++                    // the callback, polls sceCdSync(1); inside the busy window it saw "busy" and waited for good for
++                    // a callback that had already come (F1 05 hung loading the track).
+                     pendingGuestCallbacks.emplace(
+-                        totalCycles + kCdvdCompletionCycles,
++                        std::max(totalCycles + kCdvdCompletionCycles, callback->notBusyFrom),
+                         ScheduledGuestCallback{
+                             callback->address,
+                             callback->gp,
+diff --git a/ps2xTest/src/ps2_iso_image_tests.cpp b/ps2xTest/src/ps2_iso_image_tests.cpp
+index 527f4e0..5c30a07 100644
+--- a/ps2xTest/src/ps2_iso_image_tests.cpp
++++ b/ps2xTest/src/ps2_iso_image_tests.cpp
+@@ -543,6 +543,38 @@ void register_ps2_iso_image_tests()
+                      "sector 16 is the image's own PVD");
+         });
+ 
++        tc.Run("IOP CDVD: sceCdSync(1) is not busy once the read's completion callback is due (patch 0220)", [](TestCase &t)
++        {
++            TempDir dir;
++            std::filesystem::create_directories(dir.path / "DATA");
++            writeFile(dir.path / "DATA" / "file.bin", fileBytes());
++            CdvdHost host;
++            host.cdRoot = dir.path;
++            CdvdHarness cd(host);
++            uint64_t clock = 1000u;
++            cd.cdvd.setClock(&clock);
++            ps2x::iop::detail::IopCpuState cpu{};
++            cpu.gpr[4] = 0x11C44u; // sceCdCallback
++            t.IsTrue(cd.cdvd.dispatchImport(37u, cpu), "sceCdCallback is handled");
++            t.Equals(cd.searchFile("cdrom0:\\DATA\\FILE.BIN;1"), 1u, "sceCdSearchFile finds the file");
++            const uint32_t lsn = cd.memory.read32(cd.resultAddress);
++            (void)cd.cdvd.takeCompletionCallback();
++
++            t.Equals(cd.read(lsn, 1u), 1u, "sceCdRead succeeds");
++            const auto callback = cd.cdvd.takeCompletionCallback();
++            t.IsTrue(static_cast<bool>(callback), "the read queues its completion callback");
++            const auto sync1 = [&]
++            {
++                ps2x::iop::detail::IopCpuState c{};
++                c.gpr[4] = 1u;
++                return cd.cdvd.dispatchImport(11u, c) ? c.gpr[2] : 0xFFFFFFFFu;
++            };
++            t.Equals(sync1(), 1u, "right after the read sceCdSync(1) is busy (patch 0114)");
++            clock = callback ? callback->notBusyFrom : 0u;
++            t.Equals(sync1(), 0u, "from the callback's notBusyFrom cycle sceCdSync(1) is not busy");
++            t.IsTrue(callback && callback->notBusyFrom > 1000u, "the callback waits for the busy period");
++        });
++
+         tc.Run("IOP CDVD without an image keeps serving the virtual ISO of the folder", [](TestCase &t)
+         {
+             TempDir dir;

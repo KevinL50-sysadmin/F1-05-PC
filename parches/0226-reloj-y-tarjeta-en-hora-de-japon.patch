@@ -1,0 +1,166 @@
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/CD.cpp b/ps2xRuntime/src/lib/Kernel/Stubs/CD.cpp
+index 7a3e17d..d27862f 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/CD.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/CD.cpp
+@@ -517,23 +517,25 @@ namespace ps2_stubs
+             return;
+         }
+ 
+-        std::time_t now = std::time(nullptr);
+-        std::tm localTm{};
++        // The PS2 RTC keeps Japan time (UTC+9, no DST); games convert it to local time with the OSD time zone
++        // (sceScfGetLocalTimefromRTC). Host local time here made saves show 8 h early on a UTC+1 PC.
++        const std::time_t jst = std::time(nullptr) + 9 * 3600;
++        std::tm jstTm{};
+ #ifdef _WIN32
+-        localtime_s(&localTm, &now);
++        gmtime_s(&jstTm, &jst);
+ #else
+-        localtime_r(&now, &localTm);
++        gmtime_r(&jst, &jstTm);
+ #endif
+ 
+         // sceCdCLOCK format (BCD fields).
+         clockData[0] = 0;
+-        clockData[1] = toBcd(static_cast<uint32_t>(localTm.tm_sec));
+-        clockData[2] = toBcd(static_cast<uint32_t>(localTm.tm_min));
+-        clockData[3] = toBcd(static_cast<uint32_t>(localTm.tm_hour));
++        clockData[1] = toBcd(static_cast<uint32_t>(jstTm.tm_sec));
++        clockData[2] = toBcd(static_cast<uint32_t>(jstTm.tm_min));
++        clockData[3] = toBcd(static_cast<uint32_t>(jstTm.tm_hour));
+         clockData[4] = 0;
+-        clockData[5] = toBcd(static_cast<uint32_t>(localTm.tm_mday));
+-        clockData[6] = toBcd(static_cast<uint32_t>(localTm.tm_mon + 1));
+-        clockData[7] = toBcd(static_cast<uint32_t>((localTm.tm_year + 1900) % 100));
++        clockData[5] = toBcd(static_cast<uint32_t>(jstTm.tm_mday));
++        clockData[6] = toBcd(static_cast<uint32_t>(jstTm.tm_mon + 1));
++        clockData[7] = toBcd(static_cast<uint32_t>((jstTm.tm_year + 1900) % 100));
+         setReturnS32(ctx, 1);
+     }
+ 
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/MemoryCard.cpp b/ps2xRuntime/src/lib/Kernel/Stubs/MemoryCard.cpp
+index 8996144..02a1002 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/MemoryCard.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/MemoryCard.cpp
+@@ -256,12 +256,14 @@ namespace ps2_stubs
+             return resolved.lexically_normal();
+         }
+ 
+-        bool localtimeSafeMc(const std::time_t *value, std::tm *out)
++        // Memory card file times are Japan time (UTC+9, no DST), like the PS2 RTC (see sceCdReadClock).
++        bool japanTimeSafeMc(const std::time_t *value, std::tm *out)
+         {
++            const std::time_t jst = *value + 9 * 3600;
+ #ifdef _WIN32
+-            return localtime_s(out, value) == 0;
++            return gmtime_s(out, &jst) == 0;
+ #else
+-            return localtime_r(value, out) != nullptr;
++            return gmtime_r(&jst, out) != nullptr;
+ #endif
+         }
+ 
+@@ -291,7 +293,7 @@ namespace ps2_stubs
+         void writeMcDateTime(SceMcStDateTime &out, std::time_t value)
+         {
+             std::tm tm{};
+-            if (!localtimeSafeMc(&value, &tm))
++            if (!japanTimeSafeMc(&value, &tm))
+             {
+                 std::memset(&out, 0, sizeof(out));
+                 return;
+diff --git a/ps2xTest/src/ps2_runtime_io_tests.cpp b/ps2xTest/src/ps2_runtime_io_tests.cpp
+index 3d72114..4fa6893 100644
+--- a/ps2xTest/src/ps2_runtime_io_tests.cpp
++++ b/ps2xTest/src/ps2_runtime_io_tests.cpp
+@@ -610,6 +610,90 @@ void register_ps2_runtime_io_tests()
+                      "sceMcGetDir file entries should carry the closed-file attribute");
+         });
+ 
++        // The PS2 real-time clock and the memory card's file times are in Japan time (UTC+9, no DST); games turn them
++        // into local time with the OSD time zone (sceScfGetLocalTimefromRTC). Host local time there showed saves
++        // (F1 05's profile list) 8 h early on a UTC+1 PC.
++        tc.Run("sceCdReadClock reports Japan time (UTC+9) like the PS2 RTC", [](TestCase &t)
++        {
++            TestContext test;
++            constexpr uint32_t clockAddr = GUEST_BUFFER_AREA_START + 0xA00;
++            auto fromBcd = [](uint8_t v) { return static_cast<int>((v >> 4) * 10 + (v & 0x0F)); };
++            auto expectedJst = [](std::time_t now)
++            {
++                const std::time_t jst = now + 9 * 3600;
++                std::tm tm{};
++                gmtime_s(&tm, &jst);
++                return tm;
++            };
++
++            const std::time_t before = std::time(nullptr);
++            clearContext(test.ctx);
++            setRegU32(test.ctx, 4, clockAddr);
++            ps2_stubs::sceCdReadClock(test.rdram.data(), &test.ctx, nullptr);
++            const std::time_t after = std::time(nullptr);
++            t.Equals(getRegS32(&test.ctx, 2), 1, "sceCdReadClock should succeed");
++
++            const uint8_t *c = test.rdram.data() + clockAddr;
++            bool matched = false;
++            for (std::time_t now = before; now <= after && !matched; ++now)
++            {
++                const std::tm e = expectedJst(now);
++                matched = fromBcd(c[1]) == e.tm_sec && fromBcd(c[2]) == e.tm_min && fromBcd(c[3]) == e.tm_hour &&
++                          fromBcd(c[5]) == e.tm_mday && fromBcd(c[6]) == e.tm_mon + 1 &&
++                          fromBcd(c[7]) == (e.tm_year + 1900) % 100;
++            }
++            const std::tm e = expectedJst(before);
++            t.IsTrue(matched, "sceCdReadClock should return UTC+9: got " + std::to_string(fromBcd(c[3])) + ":" +
++                                  std::to_string(fromBcd(c[2])) + " " + std::to_string(fromBcd(c[5])) + "/" +
++                                  std::to_string(fromBcd(c[6])) + ", expected " + std::to_string(e.tm_hour) + ":" +
++                                  std::to_string(e.tm_min) + " " + std::to_string(e.tm_mday) + "/" +
++                                  std::to_string(e.tm_mon + 1));
++            t.Equals(static_cast<int>(c[0]), 0, "sceCdReadClock should leave the status byte at 0");
++            t.Equals(static_cast<int>(c[4]), 0, "sceCdReadClock should leave the padding byte at 0");
++        });
++
++        tc.Run("sceMcGetDir reports file times in Japan time (UTC+9)", [](TestCase &t)
++        {
++            TestContext test;
++
++            std::filesystem::create_directories(test.paths.mcRoot / "SAVEDATA");
++            const std::filesystem::path file = test.paths.mcRoot / "SAVEDATA" / "game.dat";
++            {
++                std::ofstream out(file, std::ios::binary);
++                out << "x";
++            }
++            // 2026-11-21 06:24:28.5 UTC = 2026-11-21 15:24:28 JST (half a second away from any rounding edge).
++            const auto sysTarget = std::chrono::system_clock::from_time_t(1795242268) + std::chrono::milliseconds(500);
++            std::filesystem::last_write_time(
++                file, std::chrono::time_point_cast<std::filesystem::file_time_type::duration>(
++                          std::filesystem::file_time_type::clock::now() + (sysTarget - std::chrono::system_clock::now())));
++
++            const uint32_t patternAddr = GUEST_STRING_AREA_START + 0x700;
++            writeGuestString(test.rdram.data(), patternAddr, "/SAVEDATA/game.dat");
++            clearContext(test.ctx);
++            setRegU32(test.ctx, 4, 0u);
++            setRegU32(test.ctx, 5, 0u);
++            setRegU32(test.ctx, 6, patternAddr);
++            setRegU32(test.ctx, 7, 0u);
++            setRegU32(test.ctx, 8, 8u);
++            setRegU32(test.ctx, 9, GUEST_MC_TABLE_ADDR);
++            ps2_stubs::sceMcGetDir(test.rdram.data(), &test.ctx, nullptr);
++
++            int32_t cmd = 0;
++            t.Equals(syncMc(test.rdram, &cmd), 1, "sceMcGetDir should find the file");
++            const auto *entry = reinterpret_cast<const SceMcTblGetDir *>(test.rdram.data() + GUEST_MC_TABLE_ADDR);
++            t.Equals(std::string(entry->entryName), std::string("game.dat"), "sceMcGetDir should return the file");
++            for (const SceMcStDateTime *d : {&entry->modify, &entry->create})
++            {
++                t.Equals(static_cast<int>(d->year), 2026, "file time year (JST)");
++                t.Equals(static_cast<int>(d->month), 11, "file time month (JST)");
++                t.Equals(static_cast<int>(d->day), 21, "file time day (JST)");
++                t.Equals(static_cast<int>(d->hour), 15, "file time hour should be UTC+9 (06 UTC -> 15 JST)");
++                t.Equals(static_cast<int>(d->min), 24, "file time minute (JST)");
++                t.Equals(static_cast<int>(d->sec), 28, "file time second (JST)");
++            }
++        });
++
+         tc.Run("sceMcGetInfo reports formatted and unformatted states", [](TestCase &t)
+         {
+             TestContext test;

@@ -1,0 +1,325 @@
+diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_jit.h b/ps2xRuntime/src/lib/vu/ps2_vu1_jit.h
+index f541154..d83416b 100644
+--- a/ps2xRuntime/src/lib/vu/ps2_vu1_jit.h
++++ b/ps2xRuntime/src/lib/vu/ps2_vu1_jit.h
+@@ -439,15 +439,22 @@
+         JcScale3,
+         JcTwo31,   // 2147483648.0f
+         JcClipBytes, // pshufb: bytes 0, 4, 1, 5, 2, 6 (x+ x- y+ y- z+ z-), the rest zero
++        JcLanes,     // patch 0233: 16 rows, JcLanes + c: all ones in the lanes of components c (x = bit 0 = lane 0)
+     };
+-    alignas(16) const uint32_t kJitConst[15][4] = {
++    alignas(16) const uint32_t kJitConst[31][4] = {
+         {0x7F800000u, 0x7F800000u, 0x7F800000u, 0x7F800000u}, {0u, 0u, 0u, 0u},
+         {0x7FFFFFFFu, 0x7FFFFFFFu, 0x7FFFFFFFu, 0x7FFFFFFFu}, {0x7F7FFFFFu, 0x7F7FFFFFu, 0x7F7FFFFFu, 0x7F7FFFFFu},
+         {0xFFu, 0xFFu, 0xFFu, 0xFFu}, {254u, 254u, 254u, 254u}, {1u, 1u, 1u, 1u}, {23u, 23u, 23u, 23u},
+         {0x80000000u, 0x80000000u, 0x80000000u, 0x80000000u},
+         {0x3F800000u, 0x3F800000u, 0x3F800000u, 0x3F800000u}, {0x41800000u, 0x41800000u, 0x41800000u, 0x41800000u},
+         {0x45800000u, 0x45800000u, 0x45800000u, 0x45800000u}, {0x47000000u, 0x47000000u, 0x47000000u, 0x47000000u},
+-        {0x4F000000u, 0x4F000000u, 0x4F000000u, 0x4F000000u}, {0x05010400u, 0x80800602u, 0x80808080u, 0x80808080u}};
++        {0x4F000000u, 0x4F000000u, 0x4F000000u, 0x4F000000u}, {0x05010400u, 0x80800602u, 0x80808080u, 0x80808080u},
++#define PS2_JIT_LANES(c) {(c) & 1u ? ~0u : 0u, (c) & 2u ? ~0u : 0u, (c) & 4u ? ~0u : 0u, (c) & 8u ? ~0u : 0u}
++        PS2_JIT_LANES(0u), PS2_JIT_LANES(1u), PS2_JIT_LANES(2u), PS2_JIT_LANES(3u), PS2_JIT_LANES(4u),
++        PS2_JIT_LANES(5u), PS2_JIT_LANES(6u), PS2_JIT_LANES(7u), PS2_JIT_LANES(8u), PS2_JIT_LANES(9u),
++        PS2_JIT_LANES(10u), PS2_JIT_LANES(11u), PS2_JIT_LANES(12u), PS2_JIT_LANES(13u), PS2_JIT_LANES(14u),
++        PS2_JIT_LANES(15u)};
++#undef PS2_JIT_LANES
+ 
+     // normalize4 on xmm x (rax = kJitConst), with xmm3-xmm5 as scratch: bits & ~(D & 0x7FFFFFFF) | (maxE & 0x7F7FFFFF)
+     // with D = zero exponent | maximum exponent. The same as normalize4: a zero exponent keeps the sign alone, the
+@@ -528,6 +535,13 @@
+     // noEntry (patch 0097): no flag entry at all (nothing reads MAC or status, and its commit is left out too).
+     // kindOnly (patch 0099): nothing reads MAC or status, but the entry is committed after the schedule: only its
+     // kind, with status and sticky zero (so its commit adds nothing to the D and I bits).
++    // Patch 0233 (F1 06's 0224): with a partial destination, the lanes it does not write are zeroed in a (and in b
++    // from a register and in ACC for MADD/MSUB) before the arithmetic. An operand read raw because its written lanes
++    // are known normal keeps whatever the other lanes hold, often integer data (FTOI results, packed words), which are
++    // denormals as floats: ADDPS/MULPS on them took a microcode assist per instruction, about 11-17 times dearer on
++    // the Gracemont E cores than on the P cores (F1 06 rendimiento-cpu-antiguas L5/L9). Those lanes are never stored
++    // (the blend and the flag masks take the components only), so the results are the same bits; 0 op 0 (or 0 + a
++    // normalized broadcast) needs no assist.
+     inline bool jitEmitFmac(JitEmitter &e, const BlockPair &p, const JitKnownNormal &known, bool zeros = true,
+                             const void *lateSlow = nullptr, bool stickyOnly = false, JitNormShadow *shadow = nullptr,
+                             bool noEntry = false, bool kindOnly = false)
+@@ -587,11 +601,20 @@
+                                                         : false;
+         if (!bKnown)
+             jitNormalize(e, 1);
++        const bool mask = (comp & 0xFu) != 0xFu;
++        if (mask)
++        {
++            e.cst({0x0F, 0x54}, 0, JcLanes + comp); // andps: a
++            if (op.source != FmacSourceBc && op.source != FmacSourceQ && op.source != FmacSourceI)
++                e.cst({0x0F, 0x54}, 1, JcLanes + comp); // andps: b (a broadcast is one normalized value)
++        }
+         if (madd)
+         {
+             e.loadXmm(2, B::Vu, offsetof(VU1State, acc));
+             if ((known.acc & comp) != comp)
+                 jitNormalize(e, 2);
++            if (mask)
++                e.cst({0x0F, 0x54}, 2, JcLanes + comp); // andps: c
+             // product = xmm4, value = xmm3
+             e.movaps(4, 0);
+             e.rr({0x0F, 0x59}, 4, 1); // mulps
+@@ -853,6 +876,10 @@
+     // upperEarly<upperSimple<Kind>, Dst> does them (simpleOpSse2: the same SSE operations, in the rounding mode the
+     // run set; no flags). False (the call stays) for anything else.
+     // late (patch 0081): the result whole to st.jitUp.value, for jitEmitUpperDst after the lower instruction.
++    // Patch 0233 (F1 06's 0224, as in jitEmitFmac): FTOI of a partial destination whose source is read raw (its
++    // written lanes known normal) zeroes the other lanes before MULPS and CMPLEPS, which saw the integer data there
++    // (denormal as floats) and took a microcode assist. Those lanes are never stored, so the bits are the same.
++    // The other SimpleOps do no float arithmetic on their source (integer compares, ANDs, CVTDQ2PS of integers).
+     inline bool jitEmitSimple(JitEmitter &e, const BlockPair &p, const JitKnownNormal &known, bool late = false)
+     {
+         const SimpleOp &op = p.simple;
+@@ -922,6 +949,8 @@
+         case SimpleFtoi:
+             if ((known.vf[op.fs] & comp) != comp)
+                 jitNormalize(e, 0);
++            else if ((comp & 0xFu) != 0xFu)
++                e.cst({0x0F, 0x54}, 0, JcLanes + comp); // andps: the lanes it writes (patch 0233)
+             e.cst({0x0F, 0x59}, 0, JcScale0 + op.param); // mulps: scaled
+             e.rr({0xF3, 0x0F, 0x5B}, 1, 0);             // cvttps2dq: truncated
+             e.cst({0x0F, 0x28}, 2, JcTwo31);            // movaps xmm2, 2^31
+diff --git a/ps2xTest/src/ps2_vu1_tests.cpp b/ps2xTest/src/ps2_vu1_tests.cpp
+index 2ecd7ee..5f54e8d 100644
+--- a/ps2xTest/src/ps2_vu1_tests.cpp
++++ b/ps2xTest/src/ps2_vu1_tests.cpp
+@@ -7,9 +7,13 @@
+ #include "runtime/ps2_ab.h"
+ #include "gs_test_sync.h"
+ 
++#include <xmmintrin.h>
++
++#include <array>
+ #include <cmath>
+ #include <cstdint>
+ #include <cstring>
++#include <functional>
+ #include <limits>
+ #include <memory>
+ #include <string>
+@@ -216,6 +220,88 @@ namespace
+     {
+         std::memcpy(values, data + qwordIndex * 16u, sizeof(float) * 4u);
+     }
++
++    // Patch 0233 (F1 06's 0224): the integer data (denormal as floats) that the probes keep in the lanes a partial
++    // destination does not write.
++    constexpr uint32_t kProbeDenormal = 0x00000123u;
++
++    uint32_t probeBitsOf(float value)
++    {
++        uint32_t bits = 0u;
++        std::memcpy(&bits, &value, sizeof(bits));
++        return bits;
++    }
++
++    // Patch 0233: a program (lower, upper pairs) followed by XGKICK vi4 (a PATH1 packet in data qword 16), FMAND vi5,
++    // vi6 when readFlags (Schedule::jit; without it, Schedule::jitNoFlags) and E, run four times from a clean MXCSR.
++    // setup prepares the registers of every run (vi4 = 16 and vi6 = 0xFFFF are set after it) and check looks at them
++    // and at data afterwards. Returns the runs in which the MXCSR denormal flag (DE), read in the PATH1 callback, was
++    // set: whether any SSE instruction before the XGKICK saw a denormal operand. It first checks that the flag can be
++    // seen at all here (a denormal operand of an SSE add sets it: no DAZ), so a zero is not a blind pass.
++    uint32_t runDenormalLaneProbe(TestCase &t, const std::vector<std::array<uint32_t, 2>> &pairs, bool readFlags,
++                                  const std::function<void(VU1State &)> &setup,
++                                  const std::function<void(const VU1State &, const uint8_t *)> &check)
++    {
++        Vu1Fixture fx;
++        t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
++        const unsigned int savedCsr = _mm_getcsr();
++        {
++            volatile uint32_t denormalBits = kProbeDenormal;
++            const uint32_t bits = denormalBits;
++            float denormal = 0.0f;
++            std::memcpy(&denormal, &bits, sizeof(denormal));
++            _mm_setcsr(savedCsr & ~0x3Fu);
++            volatile float sum = _mm_cvtss_f32(_mm_add_ss(_mm_set_ss(denormal), _mm_set_ss(denormal)));
++            (void)sum;
++            const bool seen = (_mm_getcsr() & 0x2u) != 0u;
++            _mm_setcsr(savedCsr);
++            t.IsTrue(seen, "a denormal SSE operand should set the MXCSR DE flag (the probe can see it)");
++        }
++        bool sawDenormal = false;
++        size_t packets = 0u;
++        fx.mem.setGifPacketCallback([&](const uint8_t *, uint32_t)
++        {
++            ++packets;
++            sawDenormal = sawDenormal || (_mm_getcsr() & 0x2u) != 0u;
++        });
++        const uint64_t tag = makeGifTag(1u, GIF_FMT_IMAGE, 0u, true);
++        std::memset(fx.code, 0, PS2_VU1_CODE_SIZE);
++        std::vector<std::array<uint32_t, 2>> program = pairs;
++        program.push_back({makeVuLowerSpecial(0x6Cu, 4u), kVuUpperNop});                     // XGKICK vi4
++        program.push_back({readFlags ? makeVuFlagRegister(0x1Au, 5u, 6u) : 0u, kVuUpperNop}); // FMAND vi5, vi6
++        program.push_back({0u, kVuUpperNop | 0x40000000u});                                  // E
++        program.push_back({0u, kVuUpperNop});
++        for (uint32_t i = 0; i < program.size(); ++i)
++            writeVuInstructionPair(fx.code, i * 8u, program[i][0], program[i][1]);
++        g_ps2AbMode.store(0);
++        VU1Interpreter vu1;
++        uint32_t runsWithDenormal = 0u;
++        for (uint32_t run = 0; run < 4u; ++run)
++        {
++            // The packet away from data qwords 0-3, which run() reads as floats (patch 0108's matrix).
++            std::memset(fx.data, 0, 32u * 16u);
++            std::memcpy(fx.data + 16u * 16u, &tag, sizeof(tag));
++            setup(vu1.state());
++            vu1.state().vi[4] = 16;
++            vu1.state().vi[6] = 0xFFFF;
++            sawDenormal = false;
++            _mm_setcsr(savedCsr & ~0x3Fu);
++            vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem, 0u, 0u, 0u, 65536u);
++            _mm_setcsr(savedCsr);
++            check(vu1.state(), fx.data);
++            if (readFlags)
++                t.Equals(vu1.state().vi[5], 0, "FMAND should see positive, non-zero results");
++            runsWithDenormal += sawDenormal ? 1u : 0u;
++        }
++        t.Equals(packets, static_cast<size_t>(4u), "every run should send its PATH1 packet");
++        return runsWithDenormal;
++    }
++
++    bool probeLanesAre(const float lanes[4], uint32_t x, uint32_t y, uint32_t z, uint32_t w)
++    {
++        const uint32_t want[4] = {x, y, z, w};
++        return std::memcmp(lanes, want, 16u) == 0;
++    }
+ }
+ 
+ void register_ps2_vu1_tests()
+@@ -2062,6 +2148,133 @@ void register_ps2_vu1_tests()
+                      "the underflowing product should set sticky Z and U");
+         });
+ 
++        // Patch 0233 (F1 06's 0224): the compiled FMAC of a partial destination no longer computes the lanes it does
++        // not write. A register that an earlier FMAC of the same schedule wrote in x and z is read raw (its x and z are
++        // known to be normal), and its y and w here hold integer data (denormal as floats): before, ADDPS added them
++        // too, which costs a microcode assist per instruction (far dearer on the E cores). The MXCSR denormal flag (DE),
++        // read in the PATH1 callback halfway through the run, shows whether any SSE instruction saw a denormal operand
++        // (before the patch: in every run). With and without a flag read after them (Schedule::jit and
++        // Schedule::jitNoFlags).
++        tc.Run("VU1 compiled partial FMAC leaves unwritten denormal lanes out of the arithmetic", [](TestCase &t)
++        {
++            const uint32_t d = kProbeDenormal;
++            const std::vector<std::array<uint32_t, 2>> pairs = {
++                {0u, makeVuUpper(0x28u, 0xAu, 1u, 1u, 2u)}, // ADD.xz vf2, vf1, vf1
++                {0u, makeVuUpper(0x28u, 0xAu, 2u, 2u, 3u)}, // ADD.xz vf3, vf2, vf2
++            };
++            const auto setup = [d](VU1State &s)
++            {
++                const uint32_t vf1[4] = {probeBitsOf(1.0f), d, probeBitsOf(2.0f), d};
++                const uint32_t vf2[4] = {0u, d, 0u, d};
++                std::memcpy(s.vf[1], vf1, 16u);
++                std::memcpy(s.vf[2], vf2, 16u);
++                std::memset(s.vf[3], 0, 16u);
++            };
++            for (const bool readFlags : {false, true})
++            {
++                const uint32_t runs = runDenormalLaneProbe(
++                    t, pairs, readFlags, setup, [&t, d](const VU1State &s, const uint8_t *)
++                {
++                    t.IsTrue(probeLanesAre(s.vf[2], probeBitsOf(2.0f), d, probeBitsOf(4.0f), d),
++                             "ADD.xz should write x and z and keep the integer y and w of vf2");
++                    t.IsTrue(probeLanesAre(s.vf[3], probeBitsOf(4.0f), 0u, probeBitsOf(8.0f), 0u),
++                             "the second ADD.xz should write x and z of vf3 only");
++                });
++                t.Equals(runs, 0u, "no SSE instruction should see the denormal lanes");
++            }
++        });
++
++        // Patch 0233 (F1 06's 0224, verification A2): every other form of the compiled FMAC with a partial
++        // destination masks the lanes it does not write too: MULA to ACC, MADD with ACC, a broadcast lane (x), Q, I,
++        // MUL with two registers and a late result (the pair's SQ reads the upper's destination, so it waits until
++        // after the lower instruction). vf2's x and z come from a FMAC (read raw), its y and w and those of ACC and of
++        // every destination are integer data (before the patch: DE set).
++        tc.Run("VU1 compiled partial FMAC forms (ACC, broadcast, Q, I, MUL, late) leave denormal lanes out",
++               [](TestCase &t)
++        {
++            const uint32_t d = kProbeDenormal;
++            const std::vector<std::array<uint32_t, 2>> pairs = {
++                {0u, makeVuUpper(0x28u, 0xAu, 1u, 1u, 2u)},                        // ADD.xz vf2, vf1, vf1
++                {0u, makeVuUpperSpecial(0x2Au, 0xAu, 2u, 2u)},                     // MULA.xz acc, vf2, vf2
++                {0u, makeVuUpper(0x29u, 0xAu, 2u, 2u, 3u)},                        // MADD.xz vf3, vf2, vf2
++                {0u, makeVuUpper(0x00u, 0xAu, 2u, 2u, 4u)},                        // ADDx.xz vf4, vf2, vf2x
++                {0u, makeVuUpper(0x1Cu, 0xAu, 0u, 2u, 5u)},                        // MULq.xz vf5, vf2, Q
++                {0u, makeVuUpper(0x1Eu, 0xAu, 0u, 2u, 6u)},                        // MULi.xz vf6, vf2, I
++                {0u, makeVuUpper(0x2Au, 0xAu, 3u, 2u, 7u)},                        // MUL.xz vf7, vf2, vf3
++                {makeVuSq(0xFu, 8u, 7u, 0), makeVuUpper(0x28u, 0xAu, 2u, 2u, 8u)}, // SQ vf8, 0(vi7) | ADD.xz vf8
++            };
++            const auto setup = [d](VU1State &s)
++            {
++                const uint32_t vf1[4] = {probeBitsOf(1.0f), d, probeBitsOf(2.0f), d};
++                const uint32_t other[4] = {0u, d, 0u, d};
++                std::memcpy(s.vf[1], vf1, 16u);
++                for (uint32_t r = 2u; r <= 8u; ++r)
++                    std::memcpy(s.vf[r], other, 16u);
++                std::memcpy(s.acc, other, 16u);
++                s.q = 0.5f;
++                s.i = 3.0f;
++                s.vi[7] = 24;
++            };
++            for (const bool readFlags : {false, true})
++            {
++                const uint32_t runs = runDenormalLaneProbe(
++                    t, pairs, readFlags, setup, [&t, d](const VU1State &s, const uint8_t *data)
++                {
++                    const auto f = probeBitsOf;
++                    t.IsTrue(probeLanesAre(s.vf[2], f(2.0f), d, f(4.0f), d), "ADD.xz should write x and z of vf2");
++                    t.IsTrue(probeLanesAre(s.acc, f(4.0f), d, f(16.0f), d), "MULA.xz should write x and z of ACC");
++                    t.IsTrue(probeLanesAre(s.vf[3], f(8.0f), d, f(32.0f), d), "MADD.xz should add ACC in x and z");
++                    t.IsTrue(probeLanesAre(s.vf[4], f(4.0f), d, f(6.0f), d), "ADDx.xz should add vf2.x");
++                    t.IsTrue(probeLanesAre(s.vf[5], f(1.0f), d, f(2.0f), d), "MULq.xz should multiply by Q");
++                    t.IsTrue(probeLanesAre(s.vf[6], f(6.0f), d, f(12.0f), d), "MULi.xz should multiply by I");
++                    t.IsTrue(probeLanesAre(s.vf[7], f(16.0f), d, f(128.0f), d), "MUL.xz should multiply vf2 by vf3");
++                    t.IsTrue(probeLanesAre(s.vf[8], f(4.0f), d, f(8.0f), d), "the late ADD.xz should write vf8");
++                    float stored[4];
++                    readVuQword(data, 24u, stored);
++                    t.IsTrue(probeLanesAre(stored, 0u, d, 0u, d), "SQ should store vf8 before its upper wrote it");
++                });
++                t.Equals(runs, 0u, "no SSE instruction should see the denormal lanes");
++            }
++        });
++
++        // Patch 0233 (F1 06's 0224, verification A3): the compiled FTOI of a partial destination whose source lanes
++        // are known normal (written by a FMAC) reads it raw, and before it multiplied and compared all four lanes,
++        // integer data (denormal as floats) included. Now those lanes are zeroed first, early and late (the SQ of
++        // FTOI4's pair reads its destination).
++        tc.Run("VU1 compiled partial FTOI leaves unwritten denormal lanes out of the arithmetic", [](TestCase &t)
++        {
++            const uint32_t d = kProbeDenormal;
++            const std::vector<std::array<uint32_t, 2>> pairs = {
++                {0u, makeVuUpper(0x28u, 0xAu, 1u, 1u, 2u)},                            // ADD.xz vf2, vf1, vf1
++                {0u, makeVuUpperSpecial(0x14u, 0xAu, 3u, 2u)},                         // FTOI0.xz vf3, vf2
++                {makeVuSq(0xFu, 4u, 7u, 0), makeVuUpperSpecial(0x15u, 0xAu, 4u, 2u)}, // SQ vf4 | FTOI4.xz vf4, vf2
++            };
++            const auto setup = [d](VU1State &s)
++            {
++                const uint32_t vf1[4] = {probeBitsOf(1.0f), d, probeBitsOf(2.0f), d};
++                const uint32_t other[4] = {0u, d, 0u, d};
++                std::memcpy(s.vf[1], vf1, 16u);
++                for (uint32_t r = 2u; r <= 4u; ++r)
++                    std::memcpy(s.vf[r], other, 16u);
++                s.vi[7] = 24;
++            };
++            for (const bool readFlags : {false, true})
++            {
++                const uint32_t runs = runDenormalLaneProbe(
++                    t, pairs, readFlags, setup, [&t, d](const VU1State &s, const uint8_t *data)
++                {
++                    t.IsTrue(probeLanesAre(s.vf[2], probeBitsOf(2.0f), d, probeBitsOf(4.0f), d),
++                             "ADD.xz should write x and z of vf2");
++                    t.IsTrue(probeLanesAre(s.vf[3], 2u, d, 4u, d), "FTOI0.xz should write x and z of vf3 only");
++                    t.IsTrue(probeLanesAre(s.vf[4], 32u, d, 64u, d), "FTOI4.xz should write x and z of vf4 only");
++                    float stored[4];
++                    readVuQword(data, 24u, stored);
++                    t.IsTrue(probeLanesAre(stored, 0u, d, 0u, d), "SQ should store vf4 before FTOI4 wrote it");
++                });
++                t.Equals(runs, 0u, "no SSE instruction should see the denormal lanes");
++            }
++        });
++
+         tc.Run("reserved opcodes stop before executing or corrupting state", [](TestCase &t)
+         {
+             Vu1Fixture fx;

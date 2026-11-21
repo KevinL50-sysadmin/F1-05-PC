@@ -1,0 +1,34 @@
+diff --git a/ps2xRuntime/CMakeLists.txt b/ps2xRuntime/CMakeLists.txt
+index 3aa9070..c6bbd39 100644
+--- a/ps2xRuntime/CMakeLists.txt
++++ b/ps2xRuntime/CMakeLists.txt
+@@ -572,11 +572,25 @@ if(WIN32 AND NOT PS2X_IS_ANDROID)
+     endif()
+     set(PS2X_RUNNER_RC "${CMAKE_CURRENT_SOURCE_DIR}/src/runner_resources.rc")
+     target_sources(ps2EntryRunner PRIVATE "${PS2X_RUNNER_RC}")
++    # F1 05 (odd/tasks/paquete.md T7): FileVersion/ProductVersion come from scripts/paquete/version.txt (the same
++    # PS2X_VERSION_PAQUETE as the [version] log line, README, LEEME and installer), so the .exe cannot drift from the
++    # package. Without that file, or if it does not start with MAJOR.MINOR.PATCH, project(PS2Runtime VERSION) is used.
++    set(PS2X_RUNNER_VERSION_MAJOR ${PS2Runtime_VERSION_MAJOR})
++    set(PS2X_RUNNER_VERSION_MINOR ${PS2Runtime_VERSION_MINOR})
++    set(PS2X_RUNNER_VERSION_PATCH ${PS2Runtime_VERSION_PATCH})
++    set(PS2X_RUNNER_VERSION_TEXTO "${PS2Runtime_VERSION}")
++    if(PS2X_VERSION_PAQUETE MATCHES "^([0-9]+)\\.([0-9]+)\\.([0-9]+)")
++        set(PS2X_RUNNER_VERSION_MAJOR ${CMAKE_MATCH_1})
++        set(PS2X_RUNNER_VERSION_MINOR ${CMAKE_MATCH_2})
++        set(PS2X_RUNNER_VERSION_PATCH ${CMAKE_MATCH_3})
++        set(PS2X_RUNNER_VERSION_TEXTO "${PS2X_VERSION_PAQUETE}")
++    endif()
++    message(STATUS "ps2EntryRunner VersionInfo: ${PS2X_RUNNER_VERSION_TEXTO}")
+     set(PS2X_RUNNER_RC_DEFINES
+-        PS2X_RUNNER_VERSION_MAJOR=${PS2Runtime_VERSION_MAJOR}
+-        PS2X_RUNNER_VERSION_MINOR=${PS2Runtime_VERSION_MINOR}
+-        PS2X_RUNNER_VERSION_PATCH=${PS2Runtime_VERSION_PATCH}
+-        "PS2X_RUNNER_VERSION_STRING=\"${PS2Runtime_VERSION}\""
++        PS2X_RUNNER_VERSION_MAJOR=${PS2X_RUNNER_VERSION_MAJOR}
++        PS2X_RUNNER_VERSION_MINOR=${PS2X_RUNNER_VERSION_MINOR}
++        PS2X_RUNNER_VERSION_PATCH=${PS2X_RUNNER_VERSION_PATCH}
++        "PS2X_RUNNER_VERSION_STRING=\"${PS2X_RUNNER_VERSION_TEXTO}\""
+     )
+     if(EXISTS "${PS2X_RUNNER_ICON}")
+         file(TO_CMAKE_PATH "${PS2X_RUNNER_ICON}" PS2X_RUNNER_ICON_PATH)
