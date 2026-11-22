@@ -23,11 +23,12 @@
 #ifndef Fecha
   #define Fecha ""
 #endif
-; La publica es otra aplicacion para Windows que la de uso personal (con datos): su AppId, su carpeta, sus accesos y su
-; nombre en Aplicaciones. Instalar o desinstalar una nunca toca la otra. AppId propios de F1 05 (no los de F1 06).
+; La publica es otra aplicacion para Windows que la de uso personal (con datos): su AppId y su carpeta. Instalar o
+; desinstalar una nunca toca la otra. AppId propios de F1 05 (no los de F1 06). Desde 1.0.1 las dos se llaman "F1 05"
+; en los accesos y en Aplicaciones (la publica se llamaba "F1 05 PC"; la carpeta F1-05-PC se queda).
 #ifdef SinDatos
   #define IdApp "{{E828217A-37A8-4404-A9A8-FB6C5D4AAE06}"
-  #define NombreApp "F1 05 PC"
+  #define NombreApp "F1 05"
   #define CarpetaApp "F1-05-PC"
 #else
   #define IdApp "{{BC9FEF81-2958-46C1-AA74-86B870B0A90C}"
@@ -132,6 +133,13 @@ Name: "{autodesktop}\{#NombreApp}"; Filename: "{app}\{#NombreExe}"; WorkingDir: 
 
 [Run]
 Filename: "{app}\{#NombreExe}"; WorkingDir: "{app}"; Description: "{cm:LaunchProgram,{#NombreApp}}"; Flags: nowait postinstall skipifsilent
+
+#ifdef SinDatos
+[InstallDelete]
+; Los accesos de la 1.0.0 publica, que se llamaban "F1 05 PC": al actualizar no quedan duplicados.
+Type: files; Name: "{autoprograms}\F1 05 PC.lnk"
+Type: files; Name: "{autodesktop}\F1 05 PC.lnk"
+#endif
 
 [UninstallDelete]
 ; Solo lo que el juego crea dentro de la carpeta del programa (la copia del disco), y la carpeta si queda vacia. Nunca

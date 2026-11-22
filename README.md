@@ -51,13 +51,13 @@ owners.
 Download one of these from [the latest release](https://github.com/KevinL50-sysadmin/F1-05-PC/releases/latest). What
 changed in each version is in [CHANGELOG.md](CHANGELOG.md).
 
-- **Installer** (`F1-05-PC-vX.Y.Z-setup.exe`): creates "F1 05 PC" shortcuts in the Start menu and on the desktop;
+- **Installer** (`F1-05-PC-vX.Y.Z-setup.exe`): creates "F1 05" shortcuts in the Start menu and on the desktop;
   uninstall from Settings > Apps (it asks whether to also delete your saves and options). One installer page lets you
   choose your ISO (already filled in if one is found in your Downloads or on your Desktop) and copies the game data
   during the installation; leave it blank to do it on the first run instead.
 - **Portable** (`F1-05-PC-vX.Y.Z-portable.zip`): unzip the folder anywhere and open `F1-05.exe`. Everything is saved
   inside that folder, so you can move it or carry it on a USB stick.
-- **[RecompLauncher](https://recomplauncher.com)**: add F1 05 PC and choose your ISO once. The launcher checks it
+- **[RecompLauncher](https://recomplauncher.com)**: add F1 05 and choose your ISO once. The launcher checks it
   against the known good dump, copies the game data and then starts the game with **Play**. The display and graphics
   settings also appear on the game's page in the launcher.
 
@@ -193,7 +193,7 @@ cámara lenta (no se salta fotogramas).
 
 **Cómo conseguirlo:** descarga el instalador o el `.zip` portable de
 [la última versión](https://github.com/KevinL50-sysadmin/F1-05-PC/releases/latest), o añádelo en
-[RecompLauncher](https://recomplauncher.com) y elige tu ISO una vez. El instalador crea los accesos "F1 05 PC" y puede
+[RecompLauncher](https://recomplauncher.com) y elige tu ISO una vez. El instalador crea los accesos "F1 05" y puede
 copiar los datos de tu ISO durante la instalación. Si no, la primera vez el juego te pide la ISO una sola vez (te
 ofrece la que encuentre en Descargas, en el Escritorio o junto al `.exe`, o la buscas tú), comprueba que es la PAL
 (SCES-53033), copia los datos a `data\` con una barra de progreso que se puede cancelar y arranca. La ISO solo se lee.

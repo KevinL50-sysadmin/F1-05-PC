@@ -4,6 +4,13 @@ All notable changes for players are listed here, newest first. Each GitHub relea
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.1] - 2026-11-22
+
+### Changed
+
+- The installer's Start menu and desktop shortcuts, and its entry in Settings > Apps, are now called "F1 05"
+  instead of "F1 05 PC". Updating from 1.0.0 removes the old "F1 05 PC" shortcuts. The install folder stays the same.
+
 ## [1.0.0] - 2026-11-22
 
 The first public release. It contains no game data: on the first start you choose your own copy

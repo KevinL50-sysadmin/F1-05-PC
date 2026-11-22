@@ -230,8 +230,8 @@ if ($Iso -or $Datos) {
 }
 
 $conDatos = (-not $SinDatos) -and (Test-Path (Join-Path $carpetaDatos 'SYSTEM.CNF'))
-# El instalador publico es otra aplicacion que el de uso personal: sus accesos se llaman "F1 05 PC".
-$accesoJuego = if ($SinDatos) { 'F1 05 PC' } else { 'F1 05' }
+# El instalador publico es otra aplicacion que el de uso personal, pero sus accesos se llaman igual: "F1 05".
+$accesoJuego = 'F1 05'
 if ($SinDatos -and (Test-Path $carpetaDatos)) {
     Write-Warning "$carpetaDatos existe: se deja en la carpeta, pero no entra en el zip ni en el instalador"
 }

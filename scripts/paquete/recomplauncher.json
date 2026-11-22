@@ -1,7 +1,7 @@
 {
   "$schema": "https://recomplauncher.com/schema/recomplauncher.json",
   "format": 1,
-  "name": "F1 05 PC",
+  "name": "F1 05",
   "game": {
     "kind": "iso",
     "label": "Your disc image (.iso) of Formula One 05 for PS2, the European PAL release, serial SCES-53033.",
