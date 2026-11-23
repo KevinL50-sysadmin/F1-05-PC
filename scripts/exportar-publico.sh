@@ -76,6 +76,7 @@ for f in "${revisados[@]}"; do es_revisado[$f]=1; done
 clasificar() {
     if [ -n "${es_revisado[$1]:-}" ]; then clase=publico; return; fi
     case "$1" in
+        discord/anuncios/*/*) clase=sin-revisar ;;
         src/*.cpp | src/*.h | parches/*.patch | discord/anuncios/*.md) clase=publico ;;
         # cerrojo-pc.sh coordina el PC del autor entre sus sesiones de trabajo; fallos-t4.ps1 son pruebas del autor
         # en su PC (fallos provocados); exportar-personales.txt son patrones privados: privados.

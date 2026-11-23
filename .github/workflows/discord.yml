@@ -1,6 +1,6 @@
 # Copy to .github/workflows/discord.yml in a game repo and set JUEGO.
 # The game repo carries its own copy of the tools in tools/discord/ (sync.py, discord_api.py, juegos.json),
-# copied from F1-PC-Discord with herramientas/copiar-a-juego.py.
+# copied from the shared Discord tools (copiar-a-juego.py).
 # Repository secrets needed (Settings > Secrets and variables > Actions):
 #   DISCORD_WEBHOOK_KNOWN_ISSUES   webhook "Race Control" of #known-issues
 #   DISCORD_WEBHOOK_ANNOUNCEMENTS  webhook "Race Control" of #announcements

@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from discord_api import DiscordError, Webhook  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-# juegos.json next to the script (copy in a game repo) or at the root of F1-PC-Discord
+# juegos.json next to the script (copy in a game repo) or at the root of the tools repo
 HERE = pathlib.Path(__file__).resolve().parent
 DEFAULT_CONFIG = HERE / "juegos.json" if (HERE / "juegos.json").exists() else ROOT / "juegos.json"
 LIMIT = 2000

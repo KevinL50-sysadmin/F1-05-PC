@@ -15,7 +15,7 @@ import urllib.request
 
 API = "https://discord.com/api/v10"
 TOKEN_FILE = pathlib.Path.home() / ".discord-recomps-token"
-USER_AGENT = "DiscordBot (https://github.com/KevinL50-sysadmin/F1-PC-Discord, 1)"
+USER_AGENT = "DiscordBot (https://discord.com/developers/docs, 1)"
 
 
 class DiscordError(RuntimeError):
