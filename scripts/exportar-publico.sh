@@ -6,7 +6,9 @@
 # gpu/pgs_puente/, scripts/ y docs/recomplauncher/developer-docs.md; por tipo los .cpp y .h de src/ y los .patch de
 # parches/. Diferencia con F1 06: el README.md de la raiz de este repositorio es el de trabajo; el publico es
 # docs/publico/README.md, que sale como README.md, y sus capturas (docs/publico/img/*.png) salen como docs/img/*.png
-# (las rutas que ya tenia el repositorio publico).
+# (las rutas que ya tenia el repositorio publico). Para el servidor de Discord salen el workflow
+# .github/workflows/discord.yml, la copia de sus herramientas (tools/discord/sync.py, discord_api.py y juegos.json:
+# lo unico de tools/ que se publica) y sus textos (discord/known-issues.md y discord/anuncios/*.md).
 # Se quedan fuera las notas de trabajo (odd/, NOTAS.md, ROADMAP.md, analisis/, el README.md de trabajo), las notas de
 # las releases (docs/releases/: van en la release de GitHub), el esquema de RecompLauncher
 # (docs/recomplauncher/recomplauncher.schema.json: es de RecompLauncher, como en F1 06 no se publica),
@@ -14,7 +16,7 @@
 # (fallos provocados en el PC del autor), scripts/exportar-personales.txt (patrones privados de datos personales, si
 # existe), .git-blame-ignore-revs y, por supuesto, cualquier dato del juego (ISO, juego/, el ELF, el codigo C++ que
 # PS2Recomp genera a partir de el, el logo del juego y su icono). Un archivo nuevo en src/, parches/, gpu/, config/,
-# scripts/, docs/ o .github/ que no este en la lista ni entre los privados conocidos hace fallar la exportacion: hay
+# scripts/, docs/, .github/, discord/ o tools/discord/ que no este en la lista ni entre los privados conocidos hace fallar la exportacion: hay
 # que revisarlo y anadirlo a una de las dos listas de abajo.
 #
 # La exportacion se monta en una carpeta temporal y se comprueba; falla (codigo 1, sin tocar dist/publico-repo) si
@@ -49,7 +51,7 @@ esac
 
 # Lista blanca revisada, archivo a archivo. Un archivo de la lista que no exista no es un fallo.
 revisados=(
-    .gitignore .gitattributes CHANGELOG.md LICENSE .github/FUNDING.yml
+    .gitignore .gitattributes CHANGELOG.md LICENSE .github/FUNDING.yml .github/workflows/discord.yml
     compilar-ps2recomp.cmd compilar-runner.cmd ejecutar.cmd entorno.cmd recompilar.cmd
     config/recomp.toml
     gpu/pgs_puente/CMakeLists.txt gpu/pgs_puente/LICENSE.txt gpu/pgs_puente/compilar.cmd
@@ -63,6 +65,8 @@ revisados=(
     scripts/medir-hilos.ps1 scripts/obtener-parallel-gs.ps1 scripts/paquete/recomplauncher.json
     scripts/paquete/version.txt scripts/perfil/analizar.py scripts/perfil/correr.ps1 scripts/perfil/jit_mapa.py
     scripts/perfil/perfil.cpp scripts/perfil/vu_dis.py scripts/simbolizar.ps1
+    tools/discord/sync.py tools/discord/discord_api.py tools/discord/juegos.json
+    discord/known-issues.md
 )
 declare -A es_revisado
 for f in "${revisados[@]}"; do es_revisado[$f]=1; done
@@ -72,13 +76,14 @@ for f in "${revisados[@]}"; do es_revisado[$f]=1; done
 clasificar() {
     if [ -n "${es_revisado[$1]:-}" ]; then clase=publico; return; fi
     case "$1" in
-        src/*.cpp | src/*.h | parches/*.patch) clase=publico ;;
+        src/*.cpp | src/*.h | parches/*.patch | discord/anuncios/*.md) clase=publico ;;
         # cerrojo-pc.sh coordina el PC del autor entre sus sesiones de trabajo; fallos-t4.ps1 son pruebas del autor
         # en su PC (fallos provocados); exportar-personales.txt son patrones privados: privados.
         scripts/cerrojo-pc.sh | scripts/pruebas/fallos-t4.ps1 | scripts/exportar-personales.txt) clase=privado ;;
         # Notas de las releases (van en la release de GitHub) y el esquema de RecompLauncher (es suyo).
         docs/releases/* | docs/recomplauncher/recomplauncher.schema.json) clase=privado ;;
-        src/* | parches/* | gpu/* | config/* | scripts/* | docs/* | .github/*) clase=sin-revisar ;;
+        src/* | parches/* | gpu/* | config/* | scripts/* | docs/* | .github/* | discord/* | tools/discord/*)
+            clase=sin-revisar ;;
         # Un archivo nuevo en la raiz (p. ej. otro .cmd) hay que revisarlo, no dejarlo fuera sin avisar.
         */*) clase=fuera ;;
         # El README.md de la raiz es el de trabajo: el publico es docs/publico/README.md.
@@ -161,12 +166,18 @@ fi
 rmdir docs/publico/img docs/publico 2>/dev/null || true
 [ ! -e docs/publico ] || fallo "quedan archivos en docs/publico sin ruta publica"
 
-excluidas=(odd NOTAS.md ROADMAP.md analisis .git-blame-ignore-revs logs dist build tools third_party juego mc0 mc1
+excluidas=(odd NOTAS.md ROADMAP.md analisis .git-blame-ignore-revs logs dist build third_party juego mc0 mc1
            datos data saves cache docs/releases docs/recomplauncher/recomplauncher.schema.json
            scripts/cerrojo-pc.sh scripts/pruebas scripts/exportar-personales.txt)
 for ruta in "${excluidas[@]}"; do
     [ ! -e "$ruta" ] || fallo "ruta excluida presente: $ruta"
 done
+# tools/ (herramientas portables) tambien esta excluida, salvo la copia de las herramientas de Discord.
+if [ -e tools ]; then
+    otras_tools="$(find tools -mindepth 1 ! -path tools/discord ! -path tools/discord/sync.py \
+        ! -path tools/discord/discord_api.py ! -path tools/discord/juegos.json -print)"
+    [ -z "$otras_tools" ] || fallo "ruta excluida presente en tools/:"$'\n'"$otras_tools"
+fi
 
 # Datos personales, sin distinguir mayusculas: rutas de la unidad J: y de la carpeta del usuario de Windows, su nombre,
 # su correo y las carpetas del proyecto y de la ISO. Se permiten el enlace a los repositorios publicos
