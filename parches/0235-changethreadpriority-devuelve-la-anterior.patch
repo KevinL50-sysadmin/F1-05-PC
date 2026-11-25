@@ -1,0 +1,187 @@
+diff --git a/ps2xRuntime/src/lib/Kernel/Syscalls/Thread.cpp b/ps2xRuntime/src/lib/Kernel/Syscalls/Thread.cpp
+index 5110ee2..2a055a4 100644
+--- a/ps2xRuntime/src/lib/Kernel/Syscalls/Thread.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Syscalls/Thread.cpp
+@@ -112,7 +112,11 @@ namespace ps2_syscalls
+             const int priority = static_cast<int>(getRegU32(ctx, 5));
+             int oldPriority = 0;
+             const int result = ee.changePriority(id, priority, interruptSafe, oldPriority);
+-            setReturnS32(ctx, result);
++            // Patch 0235: like the PS2 kernel, return the previous priority on success (a KE_ error otherwise). Games
++            // restore it with that value (F1 05 0x2FBA70: old = ChangeThreadPriority(self, 30);
++            // ChangeThreadPriority(self, old)); returning KE_OK (0) made the restore fail and left the main thread at
++            // 30, starved by a helper that spins at 14 (hang when changing the head, odd/tasks/issue-1-cabeza.md).
++            setReturnS32(ctx, result == KE_OK ? oldPriority : result);
+             ee.transferIfRequested(interruptSafe);
+         }
+ 
+diff --git a/ps2xTest/src/ps2_runtime_kernel_tests.cpp b/ps2xTest/src/ps2_runtime_kernel_tests.cpp
+index b1f59e6..1763baf 100644
+--- a/ps2xTest/src/ps2_runtime_kernel_tests.cpp
++++ b/ps2xTest/src/ps2_runtime_kernel_tests.cpp
+@@ -448,6 +448,109 @@ namespace
+         runtime->requestStop();
+     }
+ 
++    // Patch 0235: PS2 ChangeThreadPriority returns the previous priority on success, and games use it to restore it
++    // (F1 05 0x2FBA70: old = ChangeThreadPriority(self, 30); ChangeThreadPriority(self, old)).
++    int gPriorityFirstResult = 0;
++    int gPrioritySecondResult = 0;
++    int gPriorityAfterRestore = 0;
++    int gPriorityInvalidResult = 0;
++    int gPriorityAfterInvalid = 0;
++
++    void schedulerPriorityRoundTrip(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
++    {
++        setRegU32(*ctx, 4, 0u);
++        setRegU32(*ctx, 5, 30u);
++        ChangeThreadPriority(rdram, ctx, runtime);
++        gPriorityFirstResult = getRegS32(*ctx, 2);
++        setRegU32(*ctx, 4, 0u);
++        setRegU32(*ctx, 5, static_cast<uint32_t>(gPriorityFirstResult));
++        ChangeThreadPriority(rdram, ctx, runtime);
++        gPrioritySecondResult = getRegS32(*ctx, 2);
++        const GuestThread *self = runtime->eeScheduler().thread(gSchedulerCreatedId);
++        gPriorityAfterRestore = self ? self->currentPriority : -1;
++        setRegU32(*ctx, 4, 0u);
++        setRegU32(*ctx, 5, 0u);
++        ChangeThreadPriority(rdram, ctx, runtime);
++        gPriorityInvalidResult = getRegS32(*ctx, 2);
++        gPriorityAfterInvalid = self ? self->currentPriority : -1;
++        ctx->pc = 0u;
++        runtime->requestStop();
++    }
++
++    // Patch 0235 (T5): the interrupt variant, another thread's priority and an unknown thread id.
++    int gPriorityOtherId = 0;
++    int gPriorityOtherResult = 0;
++    int gPriorityOtherAfter = 0;
++    int gPrioritySelfAfter = 0;
++
++    void schedulerPriorityInterruptRoundTrip(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
++    {
++        setRegU32(*ctx, 4, 0u);
++        setRegU32(*ctx, 5, 30u);
++        iChangeThreadPriority(rdram, ctx, runtime);
++        gPriorityFirstResult = getRegS32(*ctx, 2);
++        setRegU32(*ctx, 4, 0u);
++        setRegU32(*ctx, 5, static_cast<uint32_t>(gPriorityFirstResult));
++        iChangeThreadPriority(rdram, ctx, runtime);
++        gPrioritySecondResult = getRegS32(*ctx, 2);
++        const GuestThread *self = runtime->eeScheduler().thread(gSchedulerCreatedId);
++        gPriorityAfterRestore = self ? self->currentPriority : -1;
++        ctx->pc = 0u;
++        runtime->requestStop();
++    }
++
++    void schedulerPriorityOtherThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
++    {
++        setRegU32(*ctx, 4, static_cast<uint32_t>(gPriorityOtherId));
++        setRegU32(*ctx, 5, 25u);
++        ChangeThreadPriority(rdram, ctx, runtime);
++        gPriorityOtherResult = getRegS32(*ctx, 2);
++        const GuestThread *other = runtime->eeScheduler().thread(gPriorityOtherId);
++        gPriorityOtherAfter = other ? other->currentPriority : -1;
++        const GuestThread *self = runtime->eeScheduler().thread(gSchedulerCreatedId);
++        gPrioritySelfAfter = self ? self->currentPriority : -1;
++        ctx->pc = 0u;
++        runtime->requestStop();
++    }
++
++    void schedulerPriorityUnknownThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
++    {
++        setRegU32(*ctx, 4, 9999u);
++        setRegU32(*ctx, 5, 20u);
++        ChangeThreadPriority(rdram, ctx, runtime);
++        gPriorityOtherResult = getRegS32(*ctx, 2);
++        const GuestThread *self = runtime->eeScheduler().thread(gSchedulerCreatedId);
++        gPrioritySelfAfter = self ? self->currentPriority : -1;
++        ctx->pc = 0u;
++        runtime->requestStop();
++    }
++
++    // Runs fn as a started thread of priority 13 (plus, if otherPriority > 0, a dormant thread of that priority whose id
++    // goes to gPriorityOtherId).
++    void schedulerHigh(uint8_t *, R5900Context *ctx, PS2Runtime *);
++
++    void runPriorityThread(PS2Runtime::RecompiledFunction fn, int otherPriority)
++    {
++        std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0);
++        R5900Context ctx{};
++        std::memset(&ctx, 0, sizeof(ctx));
++        PS2Runtime runtime;
++        std::vector<int> trace;
++        gSchedulerTrace = &trace;
++        runtime.registerFunction(K_SCHED_MAIN, schedulerMainExit);
++        runtime.registerFunction(K_SCHED_A, fn);
++        runtime.registerFunction(K_SCHED_HIGH, schedulerHigh);
++        ctx.pc = K_SCHED_MAIN;
++        EeScheduler &ee = runtime.eeScheduler();
++        ee.reset(rdram.data(), ctx);
++        gSchedulerCreatedId = ee.createThread(EeThreadCreateParams{0, K_SCHED_A, 0x20000u, 0x800u, 0, 13, 0});
++        gPriorityOtherId = otherPriority > 0
++                               ? ee.createThread(EeThreadCreateParams{0, K_SCHED_HIGH, 0x21000u, 0x800u, 0, otherPriority, 0})
++                               : 0;
++        ee.startThread(gSchedulerCreatedId, 0, ctx, false);
++        ee.run();
++    }
++
+     void schedulerHigh(uint8_t *, R5900Context *ctx, PS2Runtime *)
+     {
+         gSchedulerTrace->push_back(5);
+@@ -910,6 +1013,55 @@ void register_ps2_runtime_kernel_tests()
+             t.IsTrue(trace == expected, "higher priority should run before the starter continues");
+         });
+ 
++        tc.Run("ChangeThreadPriority returns the previous priority so it can be restored", [](TestCase &t)
++        {
++            // Patch 0235 (odd/tasks/issue-1-cabeza.md T3).
++            TestEnv env;
++            env.runtime.registerFunction(K_SCHED_MAIN, schedulerMainExit);
++            env.runtime.registerFunction(K_SCHED_A, schedulerPriorityRoundTrip);
++            std::vector<int> trace;
++            gSchedulerTrace = &trace;
++            env.ctx.pc = K_SCHED_MAIN;
++
++            EeScheduler &ee = env.runtime.eeScheduler();
++            ee.reset(env.rdram.data(), env.ctx);
++            gSchedulerCreatedId = ee.createThread(EeThreadCreateParams{0, K_SCHED_A, 0x20000u, 0x800u, 0, 13, 0});
++            ee.startThread(gSchedulerCreatedId, 0, env.ctx, false);
++            ee.run();
++
++            t.Equals(gPriorityFirstResult, 13, "ChangeThreadPriority(self, 30) must return the previous priority 13");
++            t.Equals(gPrioritySecondResult, 30, "restoring must return the priority it replaces (30)");
++            t.Equals(gPriorityAfterRestore, 13, "ChangeThreadPriority(self, old) must restore the priority 13");
++            t.Equals(gPriorityInvalidResult, -403 /* KE_ILLEGAL_PRIORITY */, "priority 0 must still be KE_ILLEGAL_PRIORITY");
++            t.Equals(gPriorityAfterInvalid, 13, "a rejected priority must leave the thread's priority unchanged");
++        });
++
++        tc.Run("iChangeThreadPriority also returns the previous priority", [](TestCase &t)
++        {
++            // Patch 0235 (odd/tasks/issue-1-cabeza.md T5).
++            runPriorityThread(schedulerPriorityInterruptRoundTrip, 0);
++            t.Equals(gPriorityFirstResult, 13, "iChangeThreadPriority(self, 30) must return the previous priority 13");
++            t.Equals(gPrioritySecondResult, 30, "restoring must return the priority it replaces (30)");
++            t.Equals(gPriorityAfterRestore, 13, "iChangeThreadPriority(self, old) must restore the priority 13");
++        });
++
++        tc.Run("ChangeThreadPriority of another thread returns that thread's previous priority", [](TestCase &t)
++        {
++            // Patch 0235 (odd/tasks/issue-1-cabeza.md T5).
++            runPriorityThread(schedulerPriorityOtherThread, 20);
++            t.Equals(gPriorityOtherResult, 20, "the result must be the other thread's previous priority (20)");
++            t.Equals(gPriorityOtherAfter, 25, "the other thread must take the new priority");
++            t.Equals(gPrioritySelfAfter, 13, "the caller's priority must not change");
++        });
++
++        tc.Run("ChangeThreadPriority of an unknown thread is KE_UNKNOWN_THID and changes nothing", [](TestCase &t)
++        {
++            // Patch 0235 (odd/tasks/issue-1-cabeza.md T5).
++            runPriorityThread(schedulerPriorityUnknownThread, 0);
++            t.Equals(gPriorityOtherResult, KE_UNKNOWN_THID, "ChangeThreadPriority(9999, 20) must be KE_UNKNOWN_THID");
++            t.Equals(gPrioritySelfAfter, 13, "the caller's priority must not change");
++        });
++
+         tc.Run("semaphore waiters are FIFO and signal transfers one token directly", [](TestCase &t)
+         {
+             TestEnv env;

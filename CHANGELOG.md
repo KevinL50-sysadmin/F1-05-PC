@@ -4,6 +4,13 @@ All notable changes for players are listed here, newest first. Each GitHub relea
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.2] - 2026-11-25
+
+### Fixed
+
+- Changing the head in the player creation screen no longer freezes the game
+  ([#1](https://github.com/KevinL50-sysadmin/F1-05-PC/issues/1)).
+
 ## [1.0.1] - 2026-11-22
 
 ### Changed

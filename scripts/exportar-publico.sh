@@ -48,8 +48,8 @@ esac
 
 # Las dos listas privadas se leen de la carpeta del proyecto (tambien al exportar HEAD) antes de tocar dist/. En las
 # dos cuenta cada linea sin los espacios del principio ni del final; las lineas en blanco y las que empiezan por # no
-# cuentan. Una linea que empieza por una palabra en minusculas seguida de ": " es un prefijo: si no es uno de los de
-# esa lista, falla.
+# cuentan. Una linea que empieza por una palabra en minusculas seguida de ":" y un espacio en blanco (tab incluido) es
+# un prefijo: si no es uno de los de esa lista, falla.
 personales_txt=scripts/exportar-personales.txt
 privados_txt=scripts/exportar-privados.txt
 no_valida() {
@@ -75,7 +75,7 @@ leer_lista() {
         texto="${texto%"${texto##*[![:space:]]}"}"
         texto="${texto#"${texto%%[![:space:]]*}"}"
         case "$texto" in "" | "#"*) continue ;; esac
-        if [[ $texto =~ ^([[:lower:]]+):\  ]]; then
+        if [[ $texto =~ ^([[:lower:]]+):[[:space:]] ]]; then
             conocido=0
             for prefijo in "$@"; do [ "${BASH_REMATCH[1]}" != "$prefijo" ] || conocido=1; done
             [ "$conocido" = 1 ] || no_valida "prefijo desconocido \"${BASH_REMATCH[1]}:\" en $archivo, linea $linea."

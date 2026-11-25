@@ -10,3 +10,5 @@ English only, no em or en dashes. Discord is updated by the release workflow.
 - With the software renderer (`gs = cpu`) the pause menu sometimes does not appear (the picture stays on the last
   race frame). It does not happen with the GPU renderer, the default.
 - The `.exe` is not code-signed (SmartScreen warning).
+- Changing the head in the player creation screen freezes the game; create the player without changing the
+  head for now. (fixed-in: 1.0.2)
