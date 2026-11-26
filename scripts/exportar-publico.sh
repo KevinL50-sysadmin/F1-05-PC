@@ -3,7 +3,7 @@
 # Solo sale una lista blanca revisada de archivos del repositorio (nunca lo que .gitignore deja fuera): archivo a
 # archivo los de la lista "revisados" de abajo; por tipo los .cpp y .h de src/, los .patch de parches/ y los anuncios
 # de discord/anuncios/*.md. El README.md publico es docs/publico/README.md, que sale como README.md, y sus capturas
-# (docs/publico/img/*.png) salen como docs/img/*.png. Un archivo nuevo en src/, parches/, gpu/, config/, scripts/,
+# (docs/publico/img/*.png y *.jpg) salen como docs/img/. Un archivo nuevo en src/, parches/, gpu/, config/, scripts/,
 # docs/, .github/, discord/ o tools/discord/ que no este en la lista blanca ni entre los privados hace fallar la
 # exportacion: hay que revisarlo y anadirlo a una de las dos listas.
 #
@@ -166,7 +166,10 @@ revisados=(
     gpu/pgs_puente/CMakeLists.txt gpu/pgs_puente/LICENSE.txt gpu/pgs_puente/compilar.cmd
     gpu/pgs_puente/compose_circuits.comp gpu/pgs_puente/pgs_puente.cpp gpu/pgs_puente/pgs_puente.h
     gpu/pgs_puente/pgs_readback_ring.h
-    docs/publico/README.md docs/publico/img/quick-race-menu.png docs/publico/img/race-cockpit.png
+    docs/publico/README.md docs/publico/img/cabecera-readme.png
+    docs/publico/img/tv-renault-ferrari-silverstone.jpg docs/publico/img/tv-ferrari-silverstone.jpg
+    docs/publico/img/tv-ferrari-mclaren-silverstone.jpg docs/publico/img/onboard-start-lights.jpg
+    docs/publico/img/grid-silverstone.jpg docs/publico/img/main-menu.jpg
     docs/recomplauncher/developer-docs.md
     scripts/ab/ab_resumen.py scripts/ab/correr-ab.ps1 scripts/capturar-ventana.ps1
     scripts/comprobar-recomplauncher.py scripts/elf_ps2.py scripts/empaquetar.ps1 scripts/exportar-publico.sh
