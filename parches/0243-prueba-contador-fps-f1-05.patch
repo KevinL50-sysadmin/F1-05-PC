@@ -1,0 +1,191 @@
+diff --git a/ps2xTest/CMakeLists.txt b/ps2xTest/CMakeLists.txt
+index 151ae3d..62a8c9a 100644
+--- a/ps2xTest/CMakeLists.txt
++++ b/ps2xTest/CMakeLists.txt
+@@ -56,6 +56,7 @@ add_library(ps2_test_lib STATIC
+     src/ps2_f1_panoramica_tests.cpp
+     src/ps2_f1_lua_volcado_tests.cpp
+     src/ps2_f1_opciones_juego_tests.cpp
++    src/ps2_f1_letra_tests.cpp
+ )
+ 
+ target_include_directories(ps2_test_lib PRIVATE
+diff --git a/ps2xTest/src/main.cpp b/ps2xTest/src/main.cpp
+index 9589bd7..399082f 100644
+--- a/ps2xTest/src/main.cpp
++++ b/ps2xTest/src/main.cpp
+@@ -37,6 +37,7 @@ void register_ps2_lua_traza_tests();
+ void register_ps2_f1_panoramica_tests();
+ void register_ps2_f1_lua_volcado_tests();
+ void register_ps2_f1_opciones_juego_tests();
++void register_ps2_f1_letra_tests();
+ void reset_ps2_test_function_table();
+ 
+ int main()
+@@ -78,6 +79,7 @@ int main()
+     register_ps2_f1_panoramica_tests();
+     register_ps2_f1_lua_volcado_tests();
+     register_ps2_f1_opciones_juego_tests();
++    register_ps2_f1_letra_tests();
+     int res = MiniTest::Run();
+     std::cout.flush();
+     std::cerr.flush();
+diff --git a/ps2xTest/src/ps2_f1_letra_tests.cpp b/ps2xTest/src/ps2_f1_letra_tests.cpp
+new file mode 100644
+index 0000000..0742965
+--- /dev/null
++++ b/ps2xTest/src/ps2_f1_letra_tests.cpp
+@@ -0,0 +1,102 @@
++#include "MiniTest.h"
++#include "../../../../src/f1_letra.h" // F1 05's src/, the header its f1_overrides.cpp uses
++
++#include <cstring>
++#include <string>
++#include <vector>
++
++// odd/tasks/opciones-pc.md T9 (S6): F1 05's FPS counter in the game's own letter. The .bft reader 0x2D2DE8 opens the
++// file with 0x23FBC8 (a string view: low word the address, high word the length) and reads it through its stream;
++// the bytes it reads, in order, are the file (ps2x::storeGameFontFile).
++namespace
++{
++    constexpr size_t kRam = 0x10000u;
++
++    uint64_t vista(uint32_t direccion, uint32_t largo)
++    {
++        return (uint64_t(largo) << 32) | direccion;
++    }
++}
++
++void register_ps2_f1_letra_tests()
++{
++    MiniTest::Case("F1Letra", [](TestCase &tc)
++    {
++        tc.Run("a .bft by its name, in any case; nothing else", [](TestCase &t)
++        {
++            t.IsTrue(f1::letra::esLetra("Frontend/Fonts/Futurah14Px.bft"), "F1 05's menu letter");
++            t.IsTrue(f1::letra::esLetra("HUD/Fonts/Small.BFT"), "any case");
++            t.IsFalse(f1::letra::esLetra(".bft"), "only the extension");
++            t.IsFalse(f1::letra::esLetra("Frontend/Textures/Btn.pct"), "a picture");
++            t.IsFalse(f1::letra::esLetra("Fonts/x.bft.bak"), "another extension");
++            t.IsFalse(f1::letra::esLetra(""), "empty");
++        });
++
++        tc.Run("the opened name from its string view register", [](TestCase &t)
++        {
++            std::vector<uint8_t> ram(kRam, 0xEEu);
++            const std::string nombre = "Frontend/Fonts/Futurah14Px.bft";
++            std::memcpy(ram.data() + 0x1230u, nombre.data(), nombre.size()); // not NUL-terminated: the length rules
++            t.Equals(f1::letra::nombreDeVista(ram.data(), kRam, vista(0x1230u, uint32_t(nombre.size()))), nombre,
++                     "address in the low word, length in the high word");
++            t.Equals(f1::letra::nombreDeVista(ram.data(), kRam, vista(0x1230u, 14u)), std::string("Frontend/Fonts"),
++                     "only the length");
++            ram[0x1230u + 8u] = 0u;
++            t.Equals(f1::letra::nombreDeVista(ram.data(), kRam, vista(0x1230u, uint32_t(nombre.size()))),
++                     std::string("Frontend"), "up to a NUL");
++            t.Equals(f1::letra::nombreDeVista(ram.data(), kRam, vista(0x80001230u, 8u)), std::string("Frontend"),
++                     "the address masked to the RAM");
++            t.IsTrue(f1::letra::nombreDeVista(ram.data(), kRam, vista(0x1230u, 0u)).empty(), "length 0");
++            t.IsTrue(f1::letra::nombreDeVista(ram.data(), kRam, vista(0x1230u, 256u)).empty(), "too long");
++            t.IsTrue(f1::letra::nombreDeVista(ram.data(), kRam, vista(kRam - 4u, 8u)).empty(), "past the end");
++            t.IsTrue(f1::letra::nombreDeVista(nullptr, kRam, vista(0x1230u, 8u)).empty(), "no RAM");
++        });
++
++        tc.Run("the capture: the font's stream reads, in order, until it closes", [](TestCase &t)
++        {
++            std::vector<uint8_t> ram(kRam, 0u);
++            for (size_t i = 0; i < kRam; ++i)
++                ram[i] = static_cast<uint8_t>(i * 7u);
++            f1::letra::Captura c;
++            c.abierto("Frontend/Fonts/Futurah14Px.bft", 0x500u);
++            t.IsFalse(c.activa || c.flujo != 0u, "before the reader is called: nothing followed");
++            c.empezar();
++            c.abierto("Frontend/Textures/Btn.pct", 0x400u);
++            t.Equals(c.flujo, 0u, "not a .bft: not followed");
++            c.abierto("Frontend/Fonts/Futurah14Px.bft", 0u);
++            t.Equals(c.flujo, 0u, "a failed open: not followed");
++            c.abierto("Frontend/Fonts/Futurah14Px.bft", 0x500u);
++            c.abierto("Frontend/Fonts/Futurah28Px.bft", 0x600u);
++            t.Equals(c.flujo, 0x500u, "the first .bft after the call");
++            t.Equals(c.nombre, std::string("Frontend/Fonts/Futurah14Px.bft"), "its name");
++
++            c.leer(ram.data(), kRam, 0x500u, 0x100u, 4u);
++            t.IsTrue(c.bytes.empty(), "a read is copied when the next one starts");
++            c.leer(ram.data(), kRam, 0x600u, 0x900u, 16u);
++            t.IsTrue(c.bytes.empty(), "another stream's read: ignored");
++            c.leer(ram.data(), kRam, 0x500u, 0x200u, 3u);
++            t.Equals(c.bytes.size(), size_t(4u), "the first read");
++            t.IsFalse(c.cerrar(ram.data(), kRam, 0x600u), "another stream's close: not the end");
++            t.IsTrue(c.cerrar(ram.data(), kRam, 0x500u), "the font's close: the end");
++            t.IsFalse(c.activa, "no longer following");
++            const std::vector<uint8_t> esperado = {ram[0x100], ram[0x101], ram[0x102], ram[0x103],
++                                                   ram[0x200], ram[0x201], ram[0x202]};
++            t.IsTrue(c.bytes == esperado, "both reads, in order (the last one at the close)");
++            t.IsFalse(c.cerrar(ram.data(), kRam, 0x500u), "closed once");
++            c.leer(ram.data(), kRam, 0x500u, 0x300u, 4u);
++            t.Equals(c.bytes.size(), size_t(7u), "reads after the close: ignored");
++
++            c.empezar();
++            t.IsTrue(c.activa && c.flujo == 0u && c.nombre.empty() && c.bytes.empty(), "the next call starts afresh");
++            c.abierto("HUD/Fonts/Small.bft", 0x700u);
++            c.leer(ram.data(), kRam, 0x700u, kRam - 2u, 4u);
++            t.IsTrue(c.cerrar(ram.data(), kRam, 0x700u), "closed");
++            t.IsTrue(c.bytes == std::vector<uint8_t>{ram[kRam - 2u], ram[kRam - 1u], ram[0], ram[1]},
++                     "a read wraps around the RAM (masked addresses)");
++            c.empezar();
++            c.abierto("HUD/Fonts/Small.bft", 0x700u);
++            c.leer(ram.data(), kRam, 0x700u, 0u, 0xFFFFFFFFu);
++            t.Equals(c.pendienteBytes, f1::letra::kLecturaMaxima, "a read is capped at 1 MB");
++        });
++    });
++}
+diff --git a/ps2xTest/src/ps2_f1_opciones_juego_tests.cpp b/ps2xTest/src/ps2_f1_opciones_juego_tests.cpp
+index 75ee0c1..b6e27ab 100644
+--- a/ps2xTest/src/ps2_f1_opciones_juego_tests.cpp
++++ b/ps2xTest/src/ps2_f1_opciones_juego_tests.cpp
+@@ -152,8 +152,8 @@ void register_ps2_f1_opciones_juego_tests()
+         {
+             using V = std::vector<std::string>;
+             t.IsTrue(f1::opciones_juego::clavesPagina(1) ==
+-                         V{"filtro", "supersampling", "alta_resolucion", "vsync", "pantalla"},
+-                     "1 PC GRAPHICS");
++                         V{"filtro", "supersampling", "alta_resolucion", "vsync", "mostrar_fps", "pantalla"},
++                     "1 PC GRAPHICS (T9: the FPS counter between V-Sync and the screen mode, as in F1 06)");
+             t.IsTrue(f1::opciones_juego::clavesPagina(2) == V{"volumen", "latencia_audio", "audio_mono", "vibracion"},
+                      "2 PC SETTINGS");
+             t.IsTrue(f1::opciones_juego::clavesPagina(3) == V{"aspecto", "tamano_ventana", "gs"}, "3 PC DISPLAY");
+@@ -169,13 +169,33 @@ void register_ps2_f1_opciones_juego_tests()
+                     t.IsTrue(contiene(cuerpos[pagina], "lista, \"" + clave + "\""),
+                              "page " + std::to_string(pagina) + " has the row " + clave);
+             for (const char *fuera : {"fov", "hud", "detalle_coches", "distancia_circuito", "boton_", "cargas_rapidas",
+-                                      "saltar_intro", "multinucleo", "red_", "dificultad_ia", "tecla_", "daltonismo",
+-                                      "mostrar_fps"})
++                                      "saltar_intro", "multinucleo", "red_", "dificultad_ia", "tecla_", "daltonismo"})
+                 for (int pagina = 1; pagina <= 3; ++pagina)
+                     t.IsFalse(contiene(cuerpos[pagina], std::string("\"") + fuera),
+                               std::string(fuera) + " left out (needs game hooks F1 05 lacks, or a PC extra)");
+         });
+ 
++        tc.Run("PC GRAPHICS: the FPS COUNTER row (off/on) after V-Sync and before the screen mode; at most 7 rows",
++               [](TestCase &t)
++        {
++            const std::string g = f1::opciones_juego::kPaginaGraficosPc;
++            const size_t vsync = g.find("A.fila(lista, \"vsync\""), fps = g.find("A.fila(lista, \"mostrar_fps\""),
++                         modo = g.find("A.fila(lista, \"pantalla\"");
++            t.IsTrue(vsync != std::string::npos && fps != std::string::npos && modo != std::string::npos,
++                     "the three rows");
++            t.IsTrue(vsync < fps && fps < modo, "V-Sync, FPS counter, screen mode");
++            t.IsTrue(contiene(f1::opciones_juego::kPaginaGraficosPc, "A.fila(lista, \"mostrar_fps\", T(\"CONTADOR DE FPS\", \"FPS COUNTER\"), onoff,"),
++                     "F1 06's label, Spanish and English, OFF/ON");
++            size_t filas = 0;
++            for (size_t at = g.find("A.fila("); at != std::string::npos; at = g.find("A.fila(", at + 1))
++                ++filas;
++            t.Equals(filas + 1u, size_t(7u), "6 rows and DEFAULT VALUES (F1 05 spaces rows 30 px)");
++            t.IsTrue(contiene(f1::opciones_juego::kPaginaOpcionesPc, "sincronizaci\\195\\179n vertical, contador de FPS y modo"),
++                     "the list's help for PC GRAPHICS names it (Spanish)");
++            t.IsTrue(contiene(f1::opciones_juego::kPaginaOpcionesPc, "vertical sync, FPS counter and screen mode."),
++                     "and in English");
++        });
++
+         tc.Run("PC pages: DEFAULT VALUES on each value page, sliders for volume and vibration, list entries open 1, 3, 2",
+                [](TestCase &t)
+         {

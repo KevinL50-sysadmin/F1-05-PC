@@ -1,0 +1,162 @@
+diff --git a/ps2xTest/CMakeLists.txt b/ps2xTest/CMakeLists.txt
+index 693dfd9..698e4ea 100644
+--- a/ps2xTest/CMakeLists.txt
++++ b/ps2xTest/CMakeLists.txt
+@@ -53,6 +53,7 @@ add_library(ps2_test_lib STATIC
+     src/ps2_cabecera_tests.cpp
+     src/ps2_fallo_tests.cpp
+     src/ps2_lua_traza_tests.cpp
++    src/ps2_f1_panoramica_tests.cpp
+ )
+ 
+ target_include_directories(ps2_test_lib PRIVATE
+diff --git a/ps2xTest/src/main.cpp b/ps2xTest/src/main.cpp
+index 114a350..615a7fd 100644
+--- a/ps2xTest/src/main.cpp
++++ b/ps2xTest/src/main.cpp
+@@ -34,6 +34,7 @@ void register_ps2_salida_tests();
+ void register_ps2_cabecera_tests();
+ void register_ps2_fallo_tests();
+ void register_ps2_lua_traza_tests();
++void register_ps2_f1_panoramica_tests();
+ void reset_ps2_test_function_table();
+ 
+ int main()
+@@ -72,6 +73,7 @@ int main()
+     register_ps2_cabecera_tests();
+     register_ps2_fallo_tests();
+     register_ps2_lua_traza_tests();
++    register_ps2_f1_panoramica_tests();
+     int res = MiniTest::Run();
+     std::cout.flush();
+     std::cerr.flush();
+diff --git a/ps2xTest/src/ps2_f1_panoramica_tests.cpp b/ps2xTest/src/ps2_f1_panoramica_tests.cpp
+new file mode 100644
+index 0000000..c0c7fde
+--- /dev/null
++++ b/ps2xTest/src/ps2_f1_panoramica_tests.cpp
+@@ -0,0 +1,124 @@
++#include "MiniTest.h"
++#include "../../../../src/f1_panoramica.h" // F1 05's src/, the header its f1_overrides.cpp uses
++
++#include <cstring>
++#include <vector>
++
++// odd/tasks/pantalla-ancha.md T2 (S1, S3): F1 05 reads its widescreen flag (*0x41586C + 0x28) every 10 reads of the pad
++// and reports it to the presenter (ps2SetGameWidescreen) only when it changes or the profile pointer becomes valid.
++namespace
++{
++    using f1::panoramica::kSinCambios;
++
++    constexpr uint32_t kPerfil = 0x00500000u;
++
++    struct Ram
++    {
++        std::vector<uint8_t> bytes = std::vector<uint8_t>(PS2_RAM_SIZE, 0u);
++
++        void escribir32(uint32_t direccion, uint32_t valor)
++        {
++            std::memcpy(bytes.data() + direccion, &valor, sizeof(valor));
++        }
++
++        void perfil(uint32_t puntero) { escribir32(f1::panoramica::kPunteroPerfil, puntero); }
++        void marca(uint32_t valor) { escribir32(kPerfil + f1::panoramica::kMarcaPanoramica, valor); }
++    };
++
++    // The reports of `veces` reads in a row, kSinCambios included.
++    std::vector<int> leer(f1::panoramica::Lector &lector, const Ram &ram, int veces)
++    {
++        std::vector<int> salida;
++        for (int i = 0; i < veces; ++i)
++            salida.push_back(f1::panoramica::leer(lector, ram.bytes.data()));
++        return salida;
++    }
++
++    bool soloSinCambios(const std::vector<int> &valores)
++    {
++        for (const int v : valores)
++            if (v != kSinCambios)
++                return false;
++        return true;
++    }
++}
++
++void register_ps2_f1_panoramica_tests()
++{
++    MiniTest::Case("F1Panoramica", [](TestCase &tc)
++    {
++        tc.Run("profile pointer 0 (before the Lua library starts): nothing is reported", [](TestCase &t)
++        {
++            Ram ram;
++            ram.marca(1u); // whatever +0x28 of a null pointer would hold is not read
++            f1::panoramica::Lector lector;
++            t.IsTrue(soloSinCambios(leer(lector, ram, 35)), "no report while the pointer is 0");
++        });
++
++        tc.Run("flag 0 reports 0 (4:3) on the first read with the pointer valid", [](TestCase &t)
++        {
++            Ram ram;
++            ram.perfil(kPerfil);
++            ram.marca(0u);
++            f1::panoramica::Lector lector;
++            const std::vector<int> r = leer(lector, ram, 25);
++            t.Equals(r[0], 0, "first read reports 0");
++            t.IsTrue(soloSinCambios(std::vector<int>(r.begin() + 1, r.end())), "unchanged: reported once");
++        });
++
++        tc.Run("flag 1 reports 1 (16:9); any non-zero word counts as 1", [](TestCase &t)
++        {
++            Ram ram;
++            ram.perfil(kPerfil);
++            ram.marca(1u);
++            f1::panoramica::Lector lector;
++            t.Equals(f1::panoramica::leer(lector, ram.bytes.data()), 1, "flag 1 reports 1");
++            Ram otra;
++            otra.perfil(kPerfil);
++            otra.marca(2u);
++            f1::panoramica::Lector otro;
++            t.Equals(f1::panoramica::leer(otro, otra.bytes.data()), 1, "flag 2 reports 1");
++        });
++
++        tc.Run("a change 1 -> 0 is reported at the next tenth read, not before", [](TestCase &t)
++        {
++            Ram ram;
++            ram.perfil(kPerfil);
++            ram.marca(1u);
++            f1::panoramica::Lector lector;
++            t.Equals(f1::panoramica::leer(lector, ram.bytes.data()), 1, "1 first");
++            ram.marca(0u);
++            t.IsTrue(soloSinCambios(leer(lector, ram, 9)), "reads 2-10 do not look at the flag");
++            t.Equals(f1::panoramica::leer(lector, ram.bytes.data()), 0, "read 11 reports the change to 0");
++            ram.marca(1u);
++            const std::vector<int> r = leer(lector, ram, 10);
++            t.IsTrue(soloSinCambios(std::vector<int>(r.begin(), r.end() - 1)), "reads 12-20 quiet");
++            t.Equals(r.back(), 1, "read 21 reports the change back to 1");
++        });
++
++        tc.Run("pointer valid later, and again after going back to 0: reported each time", [](TestCase &t)
++        {
++            Ram ram;
++            ram.marca(0u);
++            f1::panoramica::Lector lector;
++            t.IsTrue(soloSinCambios(leer(lector, ram, 10)), "pointer 0: quiet");
++            ram.perfil(kPerfil);
++            t.Equals(f1::panoramica::leer(lector, ram.bytes.data()), 0, "pointer valid: reports 0");
++            ram.perfil(0u);
++            t.IsTrue(soloSinCambios(leer(lector, ram, 10)), "pointer back to 0: quiet");
++            ram.perfil(kPerfil);
++            const std::vector<int> r = leer(lector, ram, 10);
++            t.IsTrue(soloSinCambios(std::vector<int>(r.begin(), r.end() - 1)), "quiet until the tenth read");
++            t.Equals(r.back(), 0, "valid again: the same 0 is reported again");
++        });
++
++        tc.Run("the profile pointer is masked like the rest of the RDRAM accesses", [](TestCase &t)
++        {
++            Ram ram;
++            ram.perfil(0x20000000u | kPerfil); // uncached mirror of the same object
++            ram.marca(1u);
++            f1::panoramica::Lector lector;
++            t.Equals(f1::panoramica::leer(lector, ram.bytes.data()), 1, "masked pointer reads +0x28");
++        });
++    });
++}

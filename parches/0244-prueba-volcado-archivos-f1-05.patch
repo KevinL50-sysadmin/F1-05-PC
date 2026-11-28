@@ -1,0 +1,193 @@
+diff --git a/ps2xTest/CMakeLists.txt b/ps2xTest/CMakeLists.txt
+index 62a8c9a..68b9d7e 100644
+--- a/ps2xTest/CMakeLists.txt
++++ b/ps2xTest/CMakeLists.txt
+@@ -57,6 +57,7 @@ add_library(ps2_test_lib STATIC
+     src/ps2_f1_lua_volcado_tests.cpp
+     src/ps2_f1_opciones_juego_tests.cpp
+     src/ps2_f1_letra_tests.cpp
++    src/ps2_f1_volcado_tests.cpp
+ )
+ 
+ target_include_directories(ps2_test_lib PRIVATE
+diff --git a/ps2xTest/src/main.cpp b/ps2xTest/src/main.cpp
+index 399082f..9f0209f 100644
+--- a/ps2xTest/src/main.cpp
++++ b/ps2xTest/src/main.cpp
+@@ -38,6 +38,7 @@ void register_ps2_f1_panoramica_tests();
+ void register_ps2_f1_lua_volcado_tests();
+ void register_ps2_f1_opciones_juego_tests();
+ void register_ps2_f1_letra_tests();
++void register_ps2_f1_volcado_tests();
+ void reset_ps2_test_function_table();
+ 
+ int main()
+@@ -80,6 +81,7 @@ int main()
+     register_ps2_f1_lua_volcado_tests();
+     register_ps2_f1_opciones_juego_tests();
+     register_ps2_f1_letra_tests();
++    register_ps2_f1_volcado_tests();
+     int res = MiniTest::Run();
+     std::cout.flush();
+     std::cerr.flush();
+diff --git a/ps2xTest/src/ps2_f1_letra_tests.cpp b/ps2xTest/src/ps2_f1_letra_tests.cpp
+index 0742965..7e1012d 100644
+--- a/ps2xTest/src/ps2_f1_letra_tests.cpp
++++ b/ps2xTest/src/ps2_f1_letra_tests.cpp
+@@ -98,5 +98,45 @@ void register_ps2_f1_letra_tests()
+             c.leer(ram.data(), kRam, 0x700u, 0u, 0xFFFFFFFFu);
+             t.Equals(c.pendienteBytes, f1::letra::kLecturaMaxima, "a read is capped at 1 MB");
+         });
++        tc.Run("the open's stream only after its normal return (L15 A1)", [](TestCase &t)
++        {
++            t.Equals(f1::letra::flujoAbierto(0x2D2E40u, 0x2D2E40u, 0x500u), 0x500u, "back at ra: v0 is the stream");
++            t.Equals(f1::letra::flujoAbierto(0x23FC10u, 0x2D2E40u, 0x500u), 0u,
++                     "back half way (a check point): v0 is not the result");
++        });
++
++        tc.Run("an abandoned capture ends at the next open (L15 A2)", [](TestCase &t)
++        {
++            f1::letra::Captura c;
++            c.empezar();
++            c.abierto("Frontend/Fonts/Futurah14Px.bft", 0u); // the reader's open failed
++            c.acabar();                                       // and the reader came back
++            t.IsTrue(c.activa, "still active until something else is opened");
++            c.abierto("Frontend/Fonts/Futurah28Px.bft", 0x600u); // a .bft opened outside the reader
++            t.IsFalse(c.activa, "the abandoned capture ended");
++            t.Equals(c.flujo, 0u, "the later .bft is not followed");
++            t.IsTrue(c.nombre.empty() && c.bytes.empty(), "nothing kept");
++
++            c.empezar();
++            c.abierto("Frontend/Fonts/Futurah14Px.bft", 0x500u);
++            c.acabar(); // came back without the close (closed some other way)
++            c.abierto("Frontend/Textures/Btn.pct", 0x700u);
++            t.IsFalse(c.activa, "also when it was following a stream");
++            std::vector<uint8_t> ram(kRam, 1u);
++            c.leer(ram.data(), kRam, 0x500u, 0x100u, 4u);
++            t.IsFalse(c.cerrar(ram.data(), kRam, 0x500u), "its stream is no longer followed");
++
++            c.empezar();
++            c.abierto("Frontend/Fonts/Futurah14Px.bft", 0x500u);
++            c.leer(ram.data(), kRam, 0x500u, 0x100u, 4u);
++            t.IsTrue(c.cerrar(ram.data(), kRam, 0x500u), "a normal read closes as before");
++            c.acabar();
++            t.IsFalse(c.activa, "acabar after the close changes nothing");
++            t.Equals(c.bytes.size(), size_t(4u), "its bytes are kept");
++            f1::letra::Captura d;
++            d.acabar();
++            d.abierto("HUD/Fonts/Small.bft", 0x700u);
++            t.IsFalse(d.activa, "acabar without empezar starts nothing");
++        });
+     });
+ }
+diff --git a/ps2xTest/src/ps2_f1_volcado_tests.cpp b/ps2xTest/src/ps2_f1_volcado_tests.cpp
+new file mode 100644
+index 0000000..1d62a28
+--- /dev/null
++++ b/ps2xTest/src/ps2_f1_volcado_tests.cpp
+@@ -0,0 +1,105 @@
++#include "MiniTest.h"
++#include "../../../../src/f1_volcado.h" // F1 05's src/, the header its f1_overrides.cpp uses
++
++#include <string>
++#include <vector>
++
++// F1_VOLCAR_ARCHIVOS=<substring>[;<substring>...] (a diagnostic, off by default): each file the game opens with
++// 0x23FBC8 whose path contains one of them (any case, '\' as '/') is copied as its stream reads it, in order, to
++// F1_VOLCAR_DIR (default logs\archivos), with one index line per file.
++namespace
++{
++    constexpr size_t kRam = 0x10000u;
++}
++
++void register_ps2_f1_volcado_tests()
++{
++    MiniTest::Case("F1Volcado", [](TestCase &tc)
++    {
++        tc.Run("the patterns: split by ';', trimmed, lower case, '\\' as '/', no empty ones", [](TestCase &t)
++        {
++            t.IsTrue(f1::volcado::patrones("driver/steer.anim;driver/skeleton.skel;driver/") ==
++                         std::vector<std::string>{"driver/steer.anim", "driver/skeleton.skel", "driver/"},
++                     "the cockpit driver's files");
++            t.IsTrue(f1::volcado::patrones(" Skins\\Cockpit05 ; ;STEER.ANIM;") ==
++                         std::vector<std::string>{"skins/cockpit05", "steer.anim"},
++                     "trimmed, lower case, '/' and without the empty ones");
++            t.IsTrue(f1::volcado::patrones("").empty(), "empty: none");
++            t.IsTrue(f1::volcado::patrones(" ; ;").empty(), "only separators: none");
++        });
++
++        tc.Run("a path matches one of the patterns, in any case and with either slash", [](TestCase &t)
++        {
++            const auto p = f1::volcado::patrones("driver/steer.anim;driver/skeleton.skel");
++            t.IsTrue(f1::volcado::coincide(p, "Skins/Cockpit05/driver/steer.anim"), "the anim");
++            t.IsTrue(f1::volcado::coincide(p, "SKINS\\COCKPIT05\\DRIVER\\SKELETON.SKEL"), "any case, '\\'");
++            t.IsFalse(f1::volcado::coincide(p, "Skins/Cockpit05/driver/DriverSkin.geom"), "another file");
++            t.IsFalse(f1::volcado::coincide(p, "Skins/Cockpit05/driverclassic/steer.anim"),
++                      "a substring, not a file name: driverclassic/ is not driver/");
++            t.IsTrue(f1::volcado::coincide(f1::volcado::patrones("driverclassic/"),
++                                           "Skins/Cockpit05/driverclassic/steer.anim"),
++                     "unless asked for");
++            t.IsFalse(f1::volcado::coincide({}, "Skins/Cockpit05/driver/steer.anim"), "no patterns: nothing");
++            t.IsFalse(f1::volcado::coincide(p, ""), "an empty path");
++        });
++
++        tc.Run("the dump's file name and its index line", [](TestCase &t)
++        {
++            t.Equals(f1::volcado::nombreArchivo("Skins/Cockpit05/driver/steer.anim", 1u),
++                     std::string("0001_Skins_Cockpit05_driver_steer.anim"), "counter, flat path");
++            t.Equals(f1::volcado::nombreArchivo("..\\a:b*c.", 12u), std::string("0012_.._a_b_c_"),
++                     "no separators, no reserved characters, no trailing dot");
++            t.Equals(f1::volcado::lineaIndice("0001_x.anim", "Skins/x.anim", 1234u, true),
++                     std::string("0001_x.anim\tSkins/x.anim\t1234\tcompleto\n"), "a whole file");
++            t.Equals(f1::volcado::lineaIndice("0002_y", "y", 0u, false), std::string("0002_y\ty\t0\tincompleto\n"),
++                     "an incomplete one");
++            t.IsTrue(f1::volcado::cabeceraIndice().rfind("# ", 0) == 0u, "the header is a comment");
++        });
++
++        tc.Run("the dump: each matching file's stream reads, in order, until it closes", [](TestCase &t)
++        {
++            std::vector<uint8_t> ram(kRam, 0u);
++            for (size_t i = 0; i < kRam; ++i)
++                ram[i] = static_cast<uint8_t>(i * 13u);
++            f1::volcado::Volcado v;
++            v.patrones = f1::volcado::patrones("driver/");
++            t.IsFalse(v.abierto(ram.data(), kRam, "Skins/Cockpit05/DriverSkin.geom", 0x400u).has_value(),
++                      "not matching: nothing");
++            t.IsFalse(v.abierto(ram.data(), kRam, "Skins/Cockpit05/driver/steer.anim", 0u).has_value(),
++                      "a failed open: nothing");
++            t.Equals(v.abiertos.size(), size_t(0u), "neither followed");
++            v.abierto(ram.data(), kRam, "Skins/Cockpit05/driver/skeleton.skel", 0x500u);
++            v.abierto(ram.data(), kRam, "Skins/Cockpit05/driver/steer.anim", 0x600u);
++            t.Equals(v.abiertos.size(), size_t(2u), "two files open at once");
++
++            v.leer(ram.data(), kRam, 0x500u, 0x100u, 4u);
++            v.leer(ram.data(), kRam, 0x600u, 0x900u, 2u);
++            v.leer(ram.data(), kRam, 0x400u, 0x700u, 8u); // the .geom's stream: not followed
++            v.leer(ram.data(), kRam, 0x500u, 0x200u, 3u);
++            t.IsFalse(v.cerrar(ram.data(), kRam, 0x400u).has_value(), "another stream's close: nothing");
++            const auto esqueleto = v.cerrar(ram.data(), kRam, 0x500u);
++            t.IsTrue(esqueleto.has_value(), "the skeleton's close");
++            t.Equals(esqueleto->nombre, std::string("Skins/Cockpit05/driver/skeleton.skel"), "its path");
++            t.IsTrue(esqueleto->bytes == std::vector<uint8_t>{ram[0x100], ram[0x101], ram[0x102], ram[0x103],
++                                                              ram[0x200], ram[0x201], ram[0x202]},
++                     "its reads, in order (the last one at the close)");
++            t.IsFalse(v.cerrar(ram.data(), kRam, 0x500u).has_value(), "closed once");
++            t.Equals(v.abiertos.size(), size_t(1u), "the anim still open");
++
++            v.leer(ram.data(), kRam, 0x600u, 0x980u, 1u);
++            const auto abandonado = v.abierto(ram.data(), kRam, "Frontend/Textures/Btn.pct", 0x600u);
++            t.IsTrue(abandonado.has_value(), "its stream opened again (closed unseen): the anim is given up");
++            t.Equals(abandonado->nombre, std::string("Skins/Cockpit05/driver/steer.anim"), "the given up one");
++            t.IsTrue(abandonado->bytes == std::vector<uint8_t>{ram[0x900], ram[0x901], ram[0x980]},
++                     "with every read it saw");
++            t.Equals(v.abiertos.size(), size_t(0u), "the .pct on that stream is not followed");
++
++            v.abierto(ram.data(), kRam, "Skins/Cockpit05/driver/steer.anim", 0x600u);
++            const auto otra = v.abierto(ram.data(), kRam, "Skins/Cockpit05/driver/steer.anim", 0x600u);
++            t.IsTrue(otra.has_value() && otra->bytes.empty(), "the same stream opened twice: the first given up");
++            t.Equals(v.abiertos.size(), size_t(1u), "the second followed");
++            v.leer(ram.data(), kRam, 0x600u, 0u, 0xFFFFFFFFu);
++            t.Equals(v.abiertos[0].pendienteBytes, f1::volcado::kLecturaMaxima, "a read is capped");
++        });
++    });
++}

@@ -1,0 +1,182 @@
+diff --git a/ps2xTest/CMakeLists.txt b/ps2xTest/CMakeLists.txt
+index 68b9d7e..ddf3f1f 100644
+--- a/ps2xTest/CMakeLists.txt
++++ b/ps2xTest/CMakeLists.txt
+@@ -58,6 +58,7 @@ add_library(ps2_test_lib STATIC
+     src/ps2_f1_opciones_juego_tests.cpp
+     src/ps2_f1_letra_tests.cpp
+     src/ps2_f1_volcado_tests.cpp
++    src/ps2_f1_campo_vision_tests.cpp
+ )
+ 
+ target_include_directories(ps2_test_lib PRIVATE
+diff --git a/ps2xTest/src/main.cpp b/ps2xTest/src/main.cpp
+index 9f0209f..502d6e0 100644
+--- a/ps2xTest/src/main.cpp
++++ b/ps2xTest/src/main.cpp
+@@ -39,6 +39,7 @@ void register_ps2_f1_lua_volcado_tests();
+ void register_ps2_f1_opciones_juego_tests();
+ void register_ps2_f1_letra_tests();
+ void register_ps2_f1_volcado_tests();
++void register_ps2_f1_campo_vision_tests();
+ void reset_ps2_test_function_table();
+ 
+ int main()
+@@ -82,6 +83,7 @@ int main()
+     register_ps2_f1_opciones_juego_tests();
+     register_ps2_f1_letra_tests();
+     register_ps2_f1_volcado_tests();
++    register_ps2_f1_campo_vision_tests();
+     int res = MiniTest::Run();
+     std::cout.flush();
+     std::cerr.flush();
+diff --git a/ps2xTest/src/ps2_f1_campo_vision_tests.cpp b/ps2xTest/src/ps2_f1_campo_vision_tests.cpp
+new file mode 100644
+index 0000000..657383f
+--- /dev/null
++++ b/ps2xTest/src/ps2_f1_campo_vision_tests.cpp
+@@ -0,0 +1,79 @@
++#include "MiniTest.h"
++#include "../../../../src/f1_campo_vision.h" // F1 05's src/, the header its f1_overrides.cpp uses
++
++#include <cmath>
++#include <cstdint>
++#include <cstring>
++#include <string>
++
++// odd/tasks/opciones-pc.md T10 (S6): the field of view of F1 05's race cameras. func_2C55B0(f12 = half angle, f13, f14,
++// a0 = camera, a1, a2) is called by the race camera method's two kinds (0x1EB768, 0x1EBDE0; returns 0x1EBA24 and
++// 0x1EC45C) and also by the camera's creation (0x111C90) and a fixed scene (0x236008); only the race calls are widened,
++// by settings.ini fov (0 = the game's; 5 to 30 = that percent), at most 1.4 rad, from the game's own angle each frame.
++namespace
++{
++    using namespace f1::campo_vision;
++
++    bool mismosBits(float a, float b)
++    {
++        return std::memcmp(&a, &b, sizeof(a)) == 0;
++    }
++}
++
++void register_ps2_f1_campo_vision_tests()
++{
++    MiniTest::Case("F1CampoVision", [](TestCase &tc)
++    {
++        tc.Run("only the two race camera calls of func_2C55B0 are widened; creation, scenes, menus and TV are not",
++               [](TestCase &t)
++        {
++            t.Equals(kCamaraEnvoltura, 0x002C55B0u, "the hooked wrapper");
++            t.IsTrue(ensanchaRetorno(0x001EBA24u), "0x1EB768's call (race camera, first kind)");
++            t.IsTrue(ensanchaRetorno(0x001EC45Cu), "0x1EBDE0's call (race camera, second kind)");
++            for (const uint32_t otro : {0x00111D58u, 0x00236260u, 0x002C55C8u, 0x00133FF0u, 0x001EEC30u, 0x001EF1B8u,
++                                        0x001EBA1Cu, 0x001EC454u, 0x00000000u, 0xFFFFFFFFu})
++                t.IsFalse(ensanchaRetorno(otro), "not widened: return 0x" + std::to_string(otro));
++            t.Equals(std::string(nombreLlamador(0x001EBA24u)), std::string("carrera 0x1EB768"), "names for the log");
++            t.Equals(std::string(nombreLlamador(0x001EC45Cu)), std::string("carrera 0x1EBDE0"), "the other kind");
++            t.Equals(std::string(nombreLlamador(0x00111D58u)), std::string("creacion 0x111C90"), "the creation");
++            t.Equals(std::string(nombreLlamador(0x00236260u)), std::string("escena 0x236008"), "the fixed scene");
++            t.Equals(std::string(nombreLlamador(0x002C55C8u)), std::string("envoltura 0x2C55B0"),
++                     "func_2C5080 from it");
++            t.Equals(std::string(nombreLlamador(0x00133FF0u)), std::string("menu 0x133F48"), "the menus' camera");
++            t.Equals(std::string(nombreLlamador(0x001EEC30u)), std::string("tv 0x1EE8E8"), "TV camera");
++            t.Equals(std::string(nombreLlamador(0x001EF1B8u)), std::string("tv 0x1EEC70"), "the other TV camera");
++            t.Equals(std::string(nombreLlamador(0x00123456u)), std::string("otro"), "anything else");
++        });
++
++        tc.Run("a race camera's half angle widened by the percent, at most 1.4 rad; others and 0 % exactly as given",
++               [](TestCase &t)
++        {
++            const uint32_t carrera = 0x001EBA24u, otra = 0x001EC45Cu, escena = 0x00236260u;
++            t.IsTrue(mismosBits(ensancharCamara(carrera, 0.3477390f, 0), 0.3477390f),
++                     "0 %: the game's angle, bit for bit");
++            t.IsTrue(std::fabs(ensancharCamara(carrera, 0.5f, 10) - 0.55f) < 1e-6f, "+10 %");
++            t.IsTrue(std::fabs(ensancharCamara(otra, 0.5f, 30) - 0.65f) < 1e-6f, "+30 % on the other kind");
++            t.IsTrue(std::fabs(ensancharCamara(carrera, 0.5f, 45) - 0.65f) < 1e-6f, "past 30 %: 30 %");
++            t.Equals(ensancharCamara(carrera, 1.2f, 30), 1.4f, "at most 1.4 rad");
++            t.Equals(ensancharCamara(carrera, 1.5f, 30), 1.5f, "never narrower than the game's");
++            t.Equals(ensancharCamara(carrera, 0.5f, -5), 0.5f, "a negative percent: unchanged");
++            t.IsTrue(std::isnan(ensancharCamara(carrera, std::nanf(""), 30)), "not a number: as it was");
++            t.IsTrue(mismosBits(ensancharCamara(escena, 0.5f, 30), 0.5f), "the fixed scene keeps its angle");
++            t.IsTrue(mismosBits(ensancharCamara(0x00111D58u, 0.2608043f, 30), 0.2608043f), "the creation too");
++            // No accumulation: the game passes its own angle (data + 0x30 * 0.75) every frame and the result only
++            // depends on it.
++            const float primera = ensancharCamara(carrera, 0.4f, 20);
++            t.IsTrue(mismosBits(ensancharCamara(carrera, 0.4f, 20), primera), "the same angle every frame");
++            t.IsTrue(std::fabs(primera - 0.48f) < 1e-6f, "+20 % of the game's, not of the last frame's");
++        });
++
++        tc.Run("PS2X_FOV: only the option's steps 0, 5 ... 30; anything else is 0 (the game's)", [](TestCase &t)
++        {
++            t.Equals(porcentajeTexto(nullptr), 0, "not set");
++            for (const int paso : {0, 5, 10, 15, 20, 25, 30})
++                t.Equals(porcentajeTexto(std::to_string(paso).c_str()), paso, "step " + std::to_string(paso));
++            for (const char *malo : {"", "12", "35", "-5", "abc", "10x", " 10", "100"})
++                t.Equals(porcentajeTexto(malo), 0, std::string("not a step: '") + malo + "'");
++        });
++    });
++}
+diff --git a/ps2xTest/src/ps2_f1_opciones_juego_tests.cpp b/ps2xTest/src/ps2_f1_opciones_juego_tests.cpp
+index b6e27ab..3456648 100644
+--- a/ps2xTest/src/ps2_f1_opciones_juego_tests.cpp
++++ b/ps2xTest/src/ps2_f1_opciones_juego_tests.cpp
+@@ -154,8 +154,9 @@ void register_ps2_f1_opciones_juego_tests()
+             t.IsTrue(f1::opciones_juego::clavesPagina(1) ==
+                          V{"filtro", "supersampling", "alta_resolucion", "vsync", "mostrar_fps", "pantalla"},
+                      "1 PC GRAPHICS (T9: the FPS counter between V-Sync and the screen mode, as in F1 06)");
+-            t.IsTrue(f1::opciones_juego::clavesPagina(2) == V{"volumen", "latencia_audio", "audio_mono", "vibracion"},
+-                     "2 PC SETTINGS");
++            t.IsTrue(f1::opciones_juego::clavesPagina(2) ==
++                         V{"volumen", "latencia_audio", "audio_mono", "vibracion", "fov"},
++                     "2 PC SETTINGS (T10: the field of view after the vibration)");
+             t.IsTrue(f1::opciones_juego::clavesPagina(3) == V{"aspecto", "tamano_ventana", "gs"}, "3 PC DISPLAY");
+             t.IsTrue(f1::opciones_juego::clavesPagina(0).empty(), "0: the game's rows");
+             t.IsTrue(f1::opciones_juego::clavesPagina(5).empty(), "5: the list");
+@@ -168,7 +169,7 @@ void register_ps2_f1_opciones_juego_tests()
+                 for (const std::string &clave : f1::opciones_juego::clavesPagina(pagina))
+                     t.IsTrue(contiene(cuerpos[pagina], "lista, \"" + clave + "\""),
+                              "page " + std::to_string(pagina) + " has the row " + clave);
+-            for (const char *fuera : {"fov", "hud", "detalle_coches", "distancia_circuito", "boton_", "cargas_rapidas",
++            for (const char *fuera : {"hud", "detalle_coches", "distancia_circuito", "boton_", "cargas_rapidas",
+                                       "saltar_intro", "multinucleo", "red_", "dificultad_ia", "tecla_", "daltonismo"})
+                 for (int pagina = 1; pagina <= 3; ++pagina)
+                     t.IsFalse(contiene(cuerpos[pagina], std::string("\"") + fuera),
+@@ -196,6 +197,39 @@ void register_ps2_f1_opciones_juego_tests()
+                      "and in English");
+         });
+ 
++        tc.Run("PC SETTINGS: the FIELD OF VIEW row (NORMAL, +5 ... +30 %) after the vibration, before DEFAULT VALUES; at "
++               "most 7 lines",
++               [](TestCase &t)
++        {
++            const std::string a = f1::opciones_juego::kPaginaAjustesPc;
++            const size_t vibracion = a.find("A.deslizador(lista, \"vibracion\""), fov = a.find("A.fila(lista, \"fov\""),
++                         defecto = a.find("A.defecto(lista, ");
++            t.IsTrue(vibracion != std::string::npos && fov != std::string::npos && defecto != std::string::npos,
++                     "the three rows");
++            t.IsTrue(vibracion < fov && fov < defecto, "vibration, field of view, DEFAULT VALUES");
++            t.IsTrue(contiene(f1::opciones_juego::kPaginaAjustesPc,
++                              "A.fila(lista, \"fov\", T(\"CAMPO DE VISI\\195\\147N\", \"FIELD OF VIEW\"),\n"
++                              "    {{\"NORMAL\", 0}, {\"+5 %\", 5}, {\"+10 %\", 10}, {\"+15 %\", 15}, {\"+20 %\", 20}, "
++                              "{\"+25 %\", 25}, {\"+30 %\", 30}},"),
++                     "F1 06's label and values (the runtime's 0, 5 ... 30), Spanish and English");
++            t.IsTrue(contiene(f1::opciones_juego::kPaginaAjustesPc,
++                              "Las c\\195\\161maras de la carrera m\\195\\161s abiertas: se ve m\\195\\161s a los lados."),
++                     "its help (Spanish)");
++            t.IsTrue(contiene(f1::opciones_juego::kPaginaAjustesPc, "Wider race cameras: you see more to the sides."),
++                     "and in English");
++            size_t filas = 0;
++            for (const char *ayudante : {"A.fila(", "A.deslizador(", "A.defecto("})
++                for (size_t at = a.find(ayudante); at != std::string::npos; at = a.find(ayudante, at + 1))
++                    ++filas;
++            t.Equals(filas, size_t(6u), "5 rows and DEFAULT VALUES (F1 05 spaces rows 30 px: at most 7)");
++            t.IsTrue(contiene(f1::opciones_juego::kPaginaOpcionesPc,
++                              "Volumen, latencia del sonido, sonido mono, vibraci\\195\\179n y campo de visi\\195\\179n."),
++                     "the list's help for PC SETTINGS names it (Spanish)");
++            t.IsTrue(contiene(f1::opciones_juego::kPaginaOpcionesPc,
++                              "Volume, audio latency, mono sound, vibration and field of view."),
++                     "and in English");
++        });
++
+         tc.Run("PC pages: DEFAULT VALUES on each value page, sliders for volume and vibration, list entries open 1, 3, 2",
+                [](TestCase &t)
+         {

@@ -4,6 +4,28 @@ All notable changes for players are listed here, newest first. Each GitHub relea
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.1.0] - 2026-11-28
+
+### Added
+
+- **PC OPTIONS** inside the game's own menus, right below DISPLAY SETTINGS in the profile options and in the pause
+  menu's options, with the game's look and screen transitions. Three pages: PC GRAPHICS (scaling filter,
+  supersampling, double resolution, V-Sync, FPS counter, screen mode), PC DISPLAY (picture shape, window size,
+  graphics renderer) and PC SETTINGS (volume, audio latency, mono, vibration strength). Each page has DEFAULT VALUES;
+  X saves to `config\settings.ini` and Triangle undoes. They never change your memory card profile.
+- **FPS counter** on the PC GRAPHICS page (off by default): the game's frames per second at the top right, drawn in
+  F1 05's own menu font, read from your disc as the game loads it. Before, `mostrar_fps` in `config\settings.ini`
+  drew nothing in F1 05.
+- **Field of view** on the PC SETTINGS page: the race cameras (cockpit, nose and TV pod) from NORMAL, the game's own,
+  to 30 % wider in steps of 5 %, so you see more to the sides. It changes as soon as you pick it, also from the
+  pause menu, and is saved as `fov` in `config\settings.ini`. Menus, the HUD and the TV cameras stay as they were.
+
+### Fixed
+
+- The game's own widescreen option now fills a 16:9 window instead of leaving the picture squeezed in 4:3. With
+  the option off the picture stays 4:3 as before
+  ([#3](https://github.com/KevinL50-sysadmin/F1-05-PC/issues/3)).
+
 ## [1.0.2] - 2026-11-25
 
 ### Fixed

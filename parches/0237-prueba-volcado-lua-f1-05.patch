@@ -1,0 +1,162 @@
+diff --git a/ps2xTest/CMakeLists.txt b/ps2xTest/CMakeLists.txt
+index 698e4ea..35e9c07 100644
+--- a/ps2xTest/CMakeLists.txt
++++ b/ps2xTest/CMakeLists.txt
+@@ -54,6 +54,7 @@ add_library(ps2_test_lib STATIC
+     src/ps2_fallo_tests.cpp
+     src/ps2_lua_traza_tests.cpp
+     src/ps2_f1_panoramica_tests.cpp
++    src/ps2_f1_lua_volcado_tests.cpp
+ )
+ 
+ target_include_directories(ps2_test_lib PRIVATE
+diff --git a/ps2xTest/src/main.cpp b/ps2xTest/src/main.cpp
+index 615a7fd..250fe99 100644
+--- a/ps2xTest/src/main.cpp
++++ b/ps2xTest/src/main.cpp
+@@ -35,6 +35,7 @@ void register_ps2_cabecera_tests();
+ void register_ps2_fallo_tests();
+ void register_ps2_lua_traza_tests();
+ void register_ps2_f1_panoramica_tests();
++void register_ps2_f1_lua_volcado_tests();
+ void reset_ps2_test_function_table();
+ 
+ int main()
+@@ -74,6 +75,7 @@ int main()
+     register_ps2_fallo_tests();
+     register_ps2_lua_traza_tests();
+     register_ps2_f1_panoramica_tests();
++    register_ps2_f1_lua_volcado_tests();
+     int res = MiniTest::Run();
+     std::cout.flush();
+     std::cerr.flush();
+diff --git a/ps2xTest/src/ps2_f1_lua_volcado_tests.cpp b/ps2xTest/src/ps2_f1_lua_volcado_tests.cpp
+new file mode 100644
+index 0000000..e08b0f3
+--- /dev/null
++++ b/ps2xTest/src/ps2_f1_lua_volcado_tests.cpp
+@@ -0,0 +1,124 @@
++#include "MiniTest.h"
++#include "../../../../src/f1_lua_volcado.h" // F1 05's src/, the header its f1_overrides.cpp uses
++
++#include <cstring>
++#include <string>
++#include <vector>
++
++// odd/tasks/opciones-pc.md T1 (S1, S3): F1_LUA_VOLCAR dumps each Lua chunk F1 05 loads with lua_load (0x29DEF8).
++// The one-shot readers (0x2891F0 of the front end, getS 0x2AE4F8) take {pointer, size}; the block reader (0x29B648)
++// hands out blocks of up to 0x4000 bytes that are appended. Each chunk goes to a flat, safe file name.
++namespace
++{
++    using f1::lua_volcado::Trozo;
++
++    struct Ram
++    {
++        std::vector<uint8_t> bytes = std::vector<uint8_t>(PS2_RAM_SIZE, 0u);
++
++        void escribir64(uint32_t direccion, uint64_t valor)
++        {
++            std::memcpy(bytes.data() + direccion, &valor, sizeof(valor));
++        }
++    };
++
++    bool soloSeguros(const std::string &nombre)
++    {
++        for (const char c : nombre)
++        {
++            const bool valido = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
++                                c == '.' || c == '_' || c == '-';
++            if (!valido)
++                return false;
++        }
++        return true;
++    }
++}
++
++void register_ps2_f1_lua_volcado_tests()
++{
++    MiniTest::Case("F1LuaVolcado", [](TestCase &tc)
++    {
++        tc.Run("{ptr, size} as 0x2891F0's ld reads it: pointer in the low word, size in the high word", [](TestCase &t)
++        {
++            Ram ram;
++            ram.escribir64(0x00200000u, (uint64_t{0x1234u} << 32) | 0x00600000u);
++            Trozo trozo;
++            t.IsTrue(f1::lua_volcado::leerPunteroTamano(ram.bytes.data(), 0x00200000u, trozo), "valid chunk");
++            t.Equals(trozo.puntero, 0x00600000u, "pointer from +0");
++            t.Equals(trozo.tamano, 0x1234u, "size from +4");
++        });
++
++        tc.Run("{ptr, size}: KSEG addresses are masked with PS2_RAM_MASK", [](TestCase &t)
++        {
++            Ram ram;
++            ram.escribir64(0x00200010u, (uint64_t{16u} << 32) | 0x20600000u);
++            Trozo trozo;
++            t.IsTrue(f1::lua_volcado::leerPunteroTamano(ram.bytes.data(), 0x20200010u, trozo), "masked data address");
++            t.Equals(trozo.puntero, 0x00600000u, "masked pointer");
++            t.Equals(trozo.tamano, 16u, "size");
++        });
++
++        tc.Run("{ptr, size}: size 0, over 4 MB or past the end of RAM is not dumped", [](TestCase &t)
++        {
++            Ram ram;
++            Trozo trozo;
++            ram.escribir64(0x00200000u, 0x00600000u);
++            t.IsFalse(f1::lua_volcado::leerPunteroTamano(ram.bytes.data(), 0x00200000u, trozo), "size 0");
++            ram.escribir64(0x00200000u, (uint64_t{0x00400001u} << 32) | 0x00600000u);
++            t.IsFalse(f1::lua_volcado::leerPunteroTamano(ram.bytes.data(), 0x00200000u, trozo), "over 4 MB");
++            ram.escribir64(0x00200000u, (uint64_t{0x100u} << 32) | (PS2_RAM_SIZE - 0x80u));
++            t.IsFalse(f1::lua_volcado::leerPunteroTamano(ram.bytes.data(), 0x00200000u, trozo), "past the end");
++            ram.escribir64(0x00200000u, (uint64_t{0x80u} << 32) | (PS2_RAM_SIZE - 0x80u));
++            t.IsTrue(f1::lua_volcado::leerPunteroTamano(ram.bytes.data(), 0x00200000u, trozo), "up to the end");
++        });
++
++        tc.Run("file name: counter, then the chunk name with only [A-Za-z0-9._-]", [](TestCase &t)
++        {
++            t.Equals(f1::lua_volcado::nombreArchivo("@Frontend/Scripts/Options/OptionsMenu.lua", 7u),
++                     std::string("0007_Frontend_Scripts_Options_OptionsMenu.lua"), "@ dropped, separators as _");
++            t.Equals(f1::lua_volcado::nombreArchivo("=ps2x:x y", 12345u), std::string("12345_ps2x_x_y"),
++                     "= dropped, the counter keeps all its digits");
++            t.Equals(f1::lua_volcado::nombreArchivo("", 1u), std::string("0001_sin_nombre"), "empty name");
++            t.Equals(f1::lua_volcado::nombreArchivo("@", 2u), std::string("0002_sin_nombre"), "only the marker");
++        });
++
++        tc.Run("file name: no path separators, no '..' component, no trailing dot", [](TestCase &t)
++        {
++            const std::string nombre = f1::lua_volcado::nombreArchivo("..\\../C:/evil/..", 3u);
++            t.IsTrue(soloSeguros(nombre), "only safe characters: " + nombre);
++            t.IsTrue(nombre.rfind("0003_", 0) == 0, "counter first: " + nombre);
++            t.IsTrue(nombre.back() != '.', "no trailing dot: " + nombre);
++        });
++
++        tc.Run("file name: a long path keeps its end, at most 96 characters after the counter", [](TestCase &t)
++        {
++            const std::string largo =
++                "@C:/work/lhammert/f105/F1/FO_200X_Game/Frontend/Scripts/PauseMenu/Profiles2005_Pause/EditProfile.lua";
++            const std::string nombre = f1::lua_volcado::nombreArchivo(largo, 9u);
++            t.Equals(nombre.size(), size_t{5u + 96u}, "length: " + nombre);
++            t.IsTrue(nombre.rfind("0009_", 0) == 0, "counter first: " + nombre);
++            t.IsTrue(nombre.size() > 15u && nombre.compare(nombre.size() - 15u, 15u, "EditProfile.lua") == 0,
++                     "the end of the path is kept: " + nombre);
++            t.IsTrue(soloSeguros(nombre), "only safe characters: " + nombre);
++        });
++
++        tc.Run("block reader: blocks are appended; one past RAM or over 4 MB in total is refused", [](TestCase &t)
++        {
++            Ram ram;
++            const uint8_t a[] = {0x1Bu, 'L', 'u', 'a'};
++            const uint8_t b[] = {'Q', 0x01u};
++            std::memcpy(ram.bytes.data() + 0x00300000u, a, sizeof(a));
++            std::memcpy(ram.bytes.data() + 0x00310000u, b, sizeof(b));
++            std::vector<uint8_t> bytes;
++            t.IsTrue(f1::lua_volcado::anadirBloque(bytes, ram.bytes.data(), 0x00300000u, 4u), "first block");
++            t.IsTrue(f1::lua_volcado::anadirBloque(bytes, ram.bytes.data(), 0x20310000u, 2u), "second, masked");
++            t.IsTrue(bytes == std::vector<uint8_t>({0x1Bu, 'L', 'u', 'a', 'Q', 0x01u}), "both blocks in order");
++            t.IsFalse(f1::lua_volcado::anadirBloque(bytes, ram.bytes.data(), PS2_RAM_SIZE - 2u, 4u), "past RAM");
++            t.Equals(bytes.size(), size_t{6u}, "a refused block adds nothing");
++            std::vector<uint8_t> grande(0x00400000u - 1u, 0u);
++            t.IsFalse(f1::lua_volcado::anadirBloque(grande, ram.bytes.data(), 0x00300000u, 2u), "over 4 MB");
++            t.Equals(grande.size(), size_t{0x00400000u - 1u}, "unchanged");
++        });
++    });
++}

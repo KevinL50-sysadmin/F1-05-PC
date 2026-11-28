@@ -1,0 +1,55 @@
+diff --git a/ps2xTest/src/ps2_f1_opciones_juego_tests.cpp b/ps2xTest/src/ps2_f1_opciones_juego_tests.cpp
+index e29cc30..75ee0c1 100644
+--- a/ps2xTest/src/ps2_f1_opciones_juego_tests.cpp
++++ b/ps2xTest/src/ps2_f1_opciones_juego_tests.cpp
+@@ -241,7 +241,7 @@ void register_ps2_f1_opciones_juego_tests()
+             t.IsTrue(contiene(e, "if mio(a, b) then G(\"ps2x:pagina\", 0) end\n    return volver(a, b)"),
+                      "Triangle on the list: the stock Back (page 0 again)");
+             t.IsTrue(contiene(e, "if f and f[3] then"), "X on the list opens the entry's page");
+-            t.IsTrue(contiene(e, "M:onDeactivate()\n    G(\"ps2x:pagina\", n)\n    S.cursor = cursor\n    M:onActivate()"),
++            t.IsTrue(contiene(e, "M:onDeactivate()\n    G(\"ps2x:pagina\", c[1])\n    S.cursor = c[2]\n    M:onActivate()"),
+                      "a page opens in the same node");
+             t.IsTrue(contiene(e, "G(\"ps2x:abrir\")\n        G(\"ps2x:recordar\")"), "a value page takes F10/F11 and keeps");
+             t.IsTrue(contiene(e, "game.pausepad() == b"), "pause: only the pad that paused");
+@@ -249,6 +249,41 @@ void register_ps2_f1_opciones_juego_tests()
+             t.IsTrue(contiene(e, "onItemIncrease = trasCambiar(onItemIncrease)"), "arrows: rebuild when asked");
+         });
+ 
++        tc.Run("PC pages host: a page shown in the same node plays the game's screen transition (T8b)", [](TestCase &t)
++        {
++            const std::string e = f1::opciones_juego::kExtensionPantalla;
++            auto tiene = [&](const char *trozo) { return e.find(trozo) != std::string::npos; };
++            t.IsTrue(tiene("S.dibujar = M.onRender\n  M.onRender = function(self)"),
++                     "each frame through Menu.onRender (the pause's onCustomRender calls it too)");
++            t.IsTrue(tiene("local bien, e = pcall(S.paso)"), "a frame of the transition under pcall");
++            t.IsTrue(tiene("local f = math.max((os.time() - a.inicio) / S.duracion, a.cuadros / (60 * S.duracion))"),
++                     "progress by the game's clock (os.time, seconds), by frames if the clock stands");
++            t.IsTrue(tiene("M:onTransition(math.max(0, (0.5 - f) * 2))\n      draw.alphafade(1 - f)"),
++                     "first half: the old rows leave as DisplaySettings' onTransitionOut moves them");
++            t.IsTrue(tiene("M:onTransition(math.max(0, (f - 0.5) * 2))\n      draw.alphafade(f)"),
++                     "second half: the new rows come in as its onTransitionIn moves them");
++            t.IsTrue(tiene("if f >= 0.5 then S.cambiar() end"), "the page is swapped halfway");
++            t.IsTrue(tiene("S.anim = nil\n      M:onTransition(1)\n      draw.alphafade(1)"),
++                     "the end: rows in place, nothing faded");
++            t.IsTrue(tiene("S.duracion = 0.5"), "the engine's 0.5 s until a transition is seen");
++            t.IsTrue(tiene("if total and total > 0 then S.duracion = total end"),
++                     "then the engine's own duration (onTransitionIn's total)");
++            t.IsTrue(tiene("onTransitionOut = function(t, total)\n      S.anim = nil"),
++                     "the engine's transitions cancel ours (they move the rows themselves)");
++            t.IsTrue(tiene("if not S.cambiando and not S.rehaciendo then\n      S.anim = nil"),
++                     "leaving the node cancels it; our own swap and a rebuild keep it");
++            size_t veces = 0;
++            for (size_t p = e.find("if S.anim and S.anim.pagina then return S.cambiar() end"); p != std::string::npos;
++                 p = e.find("if S.anim and S.anim.pagina then return S.cambiar() end", p + 1))
++                ++veces;
++            t.Equals(veces, static_cast<size_t>(3), "X, Triangle and the arrows during the first half only finish the swap");
++            t.IsTrue(tiene("S.anim = {inicio = os.time(), cuadros = 0, pagina = {n, cursor}}"), "abrir starts it");
++            t.IsTrue(tiene("if n == 0 then\n      S.cambiar()\n      S.anim = nil"),
++                     "page 0 after an error: at once, without the transition");
++            t.IsTrue(tiene("pcall(draw.alphafade, 1)"), "an error in a frame leaves nothing faded");
++            t.IsFalse(tiene("diag_"), "no diagnostic keys left");
++        });
++
+         tc.Run("PC pages host: sliders get what gClassSlider.onInit sets (onActivate needs mInc), without its draw call",
+                [](TestCase &t)
+         {

@@ -1,0 +1,151 @@
+diff --git a/ps2xRuntime/include/ps2_options.h b/ps2xRuntime/include/ps2_options.h
+index 7fa3d7c..7cb3206 100644
+--- a/ps2xRuntime/include/ps2_options.h
++++ b/ps2xRuntime/include/ps2_options.h
+@@ -42,8 +42,8 @@ namespace ps2x
+     const std::vector<OptionSpec> &optionSpecs();
+ 
+     // Fase 4 (odd/tasks/sin-extras.md T1): the options of F1 06's PC extras (saltar_intro, daltonismo, tecla_foto, hud,
+-    // tecla_hud, cargas_rapidas, fov, tecla_modo_foto, detalle_coches, distancia_circuito, dificultad_ia, red_*,
+-    // boton_*). Without the extras (ps2x::identity::kPcExtras false, ps2_game_identity.h) optionSpecs and
++    // tecla_hud, cargas_rapidas, tecla_modo_foto, detalle_coches, distancia_circuito, dificultad_ia, red_*, boton_*;
++    // fov is not one since F1 05's odd/tasks/opciones-pc.md T10). Without the extras (ps2x::identity::kPcExtras false, ps2_game_identity.h) optionSpecs and
+     // gameOptionsPageKeys leave them out: settings.ini has no rows for them and an older file's rows are unknown keys
+     // (a warning each, kept as written by rewriteOptionsText).
+     bool pcExtraOption(std::string_view key);
+diff --git a/ps2xRuntime/src/lib/ps2_options.cpp b/ps2xRuntime/src/lib/ps2_options.cpp
+index 40e9285..de6ca83 100644
+--- a/ps2xRuntime/src/lib/ps2_options.cpp
++++ b/ps2xRuntime/src/lib/ps2_options.cpp
+@@ -260,11 +260,12 @@ namespace ps2x
+              "a su ritmo para no cortarlo. 0 = como la consola.",
+              "0"},
+             // Fase 5 (T12): also a row of AJUSTES PC; the game reads it on every frame of a race camera
+-            // (src/f1_overrides.cpp, ps2_camera_fov.h).
++            // (src/f1_overrides.cpp, ps2_camera_fov.h). F1 05 (odd/tasks/opciones-pc.md T10): kept without the PC
++            // extras, so its comment names nothing of theirs (the HUD).
+             {"fov", "PS2X_FOV", "0",
+              {{"0", "0"}, {"5", "5"}, {"10", "10"}, {"15", "15"}, {"20", "20"}, {"25", "25"}, {"30", "30"}}, 0, 0,
+              "Campo de vision de las camaras de la carrera (cabina, morro, persecucion...): 0 = el del juego; 5, 10,\n"
+-             "15, 20, 25 o 30 = ese tanto por ciento mas abierto. El HUD y los menus no cambian."},
++             "15, 20, 25 o 30 = ese tanto por ciento mas abierto. Los menus y las camaras de television no cambian."},
+             // Fase 5 (T13): also a row of AJUSTES PC; the window reads the key (ps2_runtime.cpp, ps2_photo_mode.h).
+             {"tecla_modo_foto", "PS2X_TECLA_MODO_FOTO", "f8", {{"f8", "f8"}, {"f5", "f5"}, {"p", "p"}, {"no", "no"}}, 0, 0,
+              "Tecla del modo foto (f8, f5, p o no): en carrera congela el juego, quita el HUD y deja mover la camara\n"
+@@ -331,9 +332,11 @@ namespace ps2x
+ 
+     bool pcExtraOption(std::string_view key)
+     {
++        // F1 05 (odd/tasks/opciones-pc.md T10): fov is not an extra any more; F1 05's own hook widens its race
++        // cameras with it (src/f1_overrides.cpp, src/f1_campo_vision.h) and AJUSTES PC has its row.
+         static constexpr std::string_view kExtras[] = {
+             "saltar_intro",   "daltonismo",     "tecla_foto",         "hud",
+-            "tecla_hud",      "cargas_rapidas", "fov",                "tecla_modo_foto",
++            "tecla_hud",      "cargas_rapidas", "tecla_modo_foto",
+             "detalle_coches", "distancia_circuito", "dificultad_ia",  "red_puerto",
+             "red_calidad",    "red_publicas",   "boton_acelerar",     "boton_frenar",
+             "boton_subir_marcha", "boton_bajar_marcha", "boton_mirar_atras"};
+diff --git a/ps2xTest/src/ps2_options_menu_tests.cpp b/ps2xTest/src/ps2_options_menu_tests.cpp
+index 901010a..ff982d0 100644
+--- a/ps2xTest/src/ps2_options_menu_tests.cpp
++++ b/ps2xTest/src/ps2_options_menu_tests.cpp
+@@ -100,14 +100,14 @@ namespace
+ 
+     // Fase 4 (odd/tasks/sin-extras.md T1): the settings.ini rows of F1 06's PC extras and the platform rows that stay.
+     constexpr const char *kExtraKeys[] = {"saltar_intro",       "daltonismo",         "tecla_foto",      "hud",
+-                                          "tecla_hud",          "cargas_rapidas",     "fov",             "tecla_modo_foto",
++                                          "tecla_hud",          "cargas_rapidas",     "tecla_modo_foto",
+                                           "detalle_coches",     "distancia_circuito", "dificultad_ia",   "red_puerto",
+                                           "red_calidad",        "red_publicas",       "boton_acelerar",  "boton_frenar",
+                                           "boton_subir_marcha", "boton_bajar_marcha", "boton_mirar_atras"};
+     constexpr const char *kPlatformKeys[] = {"pantalla",      "tamano_ventana",  "aspecto",        "filtro",
+                                              "vsync",         "mostrar_fps",     "volumen",        "registro",
+                                              "vigilante",     "gs",              "supersampling",  "alta_resolucion",
+-                                             "latencia_audio", "audio_mono",     "vibracion"};
++                                             "latencia_audio", "audio_mono",     "vibracion",      "fov"};
+ 
+     // The tests of F1 06's PC extras run only with them on (PS2X_GAME_PC_EXTRAS 1); the fase 4 ones only with them off.
+     void runWithExtras(TestCase &tc, const std::string &name, TestRunnerCallback fn)
+@@ -206,8 +206,8 @@ void register_ps2_options_menu_tests()
+             t.IsTrue(ps2x::gameOptionsPageKeys(1) == Keys{"filtro", "supersampling", "alta_resolucion", "vsync",
+                                                            "mostrar_fps", "pantalla", "volumen"},
+                      "PC GRAPHICS: the platform rows only");
+-            t.IsTrue(ps2x::gameOptionsPageKeys(2) == Keys{"latencia_audio", "audio_mono", "vibracion"},
+-                     "PC SETTINGS: the platform rows only");
++            t.IsTrue(ps2x::gameOptionsPageKeys(2) == Keys{"latencia_audio", "audio_mono", "vibracion", "fov"},
++                     "PC SETTINGS: the platform rows only (F1 05 T10: and the field of view)");
+             t.IsTrue(ps2x::gameOptionsPageKeys(3) == Keys{"aspecto", "tamano_ventana", "gs"}, "PC DISPLAY as before");
+             t.IsTrue(ps2x::gameOptionsPageKeys(4).empty() && ps2x::gameOptionsPageKeys(6).empty(),
+                      "PC NETPLAY and PC CONTROLS: none");
+@@ -225,7 +225,8 @@ void register_ps2_options_menu_tests()
+             t.Equals(parsed.values.at("volumen"), std::string("40"), "all of them");
+             for (const char *key : kExtraKeys)
+                 t.IsTrue(parsed.values.count(key) == 0u, std::string("no value for ") + key);
+-            t.Equals(parsed.warnings.size(), size_t{10u}, "one warning per extras row");
++            t.Equals(parsed.warnings.size(), size_t{9u}, "one warning per extras row (fov is F1 05's too: T10)");
++            t.Equals(parsed.values.at("fov"), std::string("20"), "fov is read");
+             for (const std::string &warning : parsed.warnings)
+                 t.IsTrue(contains(warning, "opcion desconocida") && contains(warning, "se ignora"),
+                          "only unknown-key warnings: " + warning);
+@@ -754,6 +755,42 @@ void register_ps2_options_menu_tests()
+             t.Equals(fileValue(saved, "hud"), std::string("completo"), "the other options keep their values");
+         });
+ 
++        // F1 05 (odd/tasks/opciones-pc.md T10): without the other PC extras fov stays, a row of AJUSTES PC.
++        runWithoutExtras(tc, "without the PC extras the fov option stays: default 0, PS2X_FOV, the steps and its number",
++                         [](TestCase &t)
++        {
++            t.IsFalse(ps2x::pcExtraOption("fov"), "not one of the extras");
++            t.Equals(ps2x::parseOptions("").values.at("fov"), std::string("0"), "the game's by default");
++            t.Equals(fileValue("", "fov", true), std::string("0"), "also in development");
++            t.IsTrue(contains(ps2x::defaultOptionsText(false), "\nfov = 0\n"), "the template has it");
++            t.IsFalse(contains(ps2x::defaultOptionsText(false), "cargas_rapidas"), "but not the other extras");
++
++            const ps2x::OptionsFile file = ps2x::parseOptions("fov = 30\n", "settings.ini");
++            t.IsTrue(file.warnings.empty(), "a valid value gives no warning");
++            std::string variable = "<none>";
++            for (const ps2x::EnvironmentSetting &setting : ps2x::optionsEnvironment(file, environmentOf({})))
++                if (setting.variable == "PS2X_FOV")
++                    variable = setting.value;
++            t.Equals(variable, std::string("30"), "fov -> PS2X_FOV");
++            t.Equals(ps2x::parseOptions("fov = 12\n").warnings.size(), size_t{1u}, "a value between the steps warns");
++            t.Equals(ps2x::parseOptions("fov = 12\n").values.at("fov"), std::string("0"), "and takes the default");
++            t.Equals(ps2x::parseOptions("fov = 35\n").values.at("fov"), std::string("0"), "past 30 too");
++
++            ps2x::OptionsMenuModel model = ps2x::makeOptionsMenuModel("volumen = 40\n", false, {}, environmentOf({}));
++            float value = -99.0f;
++            t.IsTrue(ps2x::menuOptionNumber(model, "fov", value), "a number for the game's row");
++            t.Equals(value, 0.0f, "0");
++            t.IsTrue(ps2x::setMenuOptionNumber(model, "fov", 30.0f), "+30 %");
++            t.IsTrue(ps2x::menuOptionNumber(model, "fov", value) && value == 30.0f, "read back as the percent");
++            t.IsFalse(ps2x::setMenuOptionNumber(model, "fov", 12.0f), "not between the steps");
++            t.Equals(model.current.at("fov"), std::string("30"), "stays 30");
++            const std::string saved = ps2x::rewriteOptionsText("volumen = 40\n", ps2x::menuValuesToSave(model), false);
++            t.Equals(fileValue(saved, "fov"), std::string("30"), "X writes it");
++            t.Equals(fileValue(saved, "volumen"), std::string("40"), "the other options keep their values");
++            ps2x::resetMenuOptionsToDefaults(model, ps2x::gameOptionsPageKeys(2));
++            t.Equals(model.current.at("fov"), std::string("0"), "DEFAULT VALUES: back to the game's");
++        });
++
+         // Lejania T4: the cars' level of detail (detalle_coches = 1, as on the PS2, or 0, the port's old reduced one),
+         // on in development too. Lejania T5: 2 (high, each level twice as far) and 3 (maximum, every piece at level 0).
+         runWithExtras(tc, "the detalle_coches option has its default, variable, checks and number", [](TestCase &t)
+diff --git a/ps2xTest/src/ps2_user_paths_tests.cpp b/ps2xTest/src/ps2_user_paths_tests.cpp
+index 3bbec12..2fd7ac5 100644
+--- a/ps2xTest/src/ps2_user_paths_tests.cpp
++++ b/ps2xTest/src/ps2_user_paths_tests.cpp
+@@ -811,10 +811,11 @@ void register_ps2_user_paths_tests()
+                          std::string("key line of ") + spec.key);
+                 t.IsTrue(spec.comment != nullptr && spec.comment[0] != '\0', std::string("comment of ") + spec.key);
+             }
+-            // Fase 4 (odd/tasks/sin-extras.md T1): without F1 06's PC extras their nineteen rows are left out.
+-            t.Equals(ps2x::optionSpecs().size(), ps2x::identity::kPcExtras ? size_t{34} : size_t{15},
++            // Fase 4 (odd/tasks/sin-extras.md T1): without F1 06's PC extras their rows are left out (eighteen: F1 05
++            // keeps fov, odd/tasks/opciones-pc.md T10).
++            t.Equals(ps2x::optionSpecs().size(), ps2x::identity::kPcExtras ? size_t{34} : size_t{16},
+                      "thirty-four options with the PC extras (fase 5: fifteen more; lejania: two; vigilante: one; "
+-                     "controles: five), fifteen without them");
++                     "controles: five), sixteen without them (F1 05 T10: fov stays)");
+ 
+             const std::string development = ps2x::defaultOptionsText(true);
+             const ps2x::OptionsFile parsedDevelopment = ps2x::parseOptions(development, "opciones.ini", true);

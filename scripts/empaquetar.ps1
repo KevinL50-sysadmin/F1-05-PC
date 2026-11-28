@@ -1,7 +1,7 @@
 # Empaqueta F1 05 recompilado como un juego de PC: carpeta portable, zip e instalador (fase 5 T2, odd/tasks/paquete.md).
 # Adaptado de scripts\empaquetar.ps1 de F1 06, sin lo que la fase 4 apago (odd/tasks/sin-extras.md): ni el acceso del
-# invitado del juego en red, ni la carpeta mods\, ni textos del juego en red, el modo foto, las fotos o las paginas de
-# OPCIONES PC (F1 05 no las tiene).
+# invitado del juego en red, ni la carpeta mods\, ni textos del juego en red, el modo foto o las fotos (F1 05 no los
+# tiene; sus OPCIONES PC van en los menus del juego desde la 1.1.0).
 # Portable: una carpeta (por defecto dist\F1-05-portable; con -SinDatos, dist\F1-05-publico) con el .exe, sus DLL,
 # portable.txt, README.txt (ingles), LEEME.txt (espanol), recomplauncher.json (de scripts\paquete, para RecompLauncher;
 # se comprueba con scripts\comprobar-recomplauncher.py) y licenses\ (licencias de terceros y codigo fuente de
@@ -328,8 +328,10 @@ Controles y ventana
 - F10: cambia el aspecto (4:3, 16:9, pixeles de la consola).
 - Para salir del juego, cierra la ventana (la X o Alt+F4).
 - Las opciones del PC (modo de la ventana, tamano, aspecto, filtro de la imagen, supersampling, sincronizacion
-  vertical, contador de FPS, volumen, sonido y vibracion) estan en config\settings.ini, cada una explicada dentro;
-  borralo para volver a los valores por defecto. Si usas RecompLauncher, tambien se cambian en la ficha del juego.
+  vertical, contador de FPS, campo de vision, volumen, sonido y vibracion) se cambian en el propio juego, en
+  OPCIONES PC (en las opciones del perfil y en las del menu de pausa), y se guardan en config\settings.ini, cada
+  una explicada dentro; borralo para volver a los valores por defecto. Si usas RecompLauncher, tambien se cambian
+  en la ficha del juego.
 
 Graficos
 --------
@@ -420,8 +422,10 @@ Controls and window
 - F10: changes the aspect ratio (4:3, 16:9, console pixels).
 - To quit the game, close the window (the X or Alt+F4).
 - The PC options (window mode, window size, aspect ratio, scaling filter, supersampling, V-Sync, FPS counter,
-  volume, sound and vibration) are in config\settings.ini, each one explained inside (in Spanish); delete it to go
-  back to the defaults. If you use RecompLauncher, they can also be changed on the game's page.
+  field of view, volume, sound and vibration) are changed in the game itself, in PC OPTIONS (in the profile
+  options and in the pause menu's options), and are saved in config\settings.ini, each one explained inside (in
+  Spanish); delete it to go back to the defaults. If you use RecompLauncher, they can also be changed on the
+  game's page.
 
 Graphics
 --------

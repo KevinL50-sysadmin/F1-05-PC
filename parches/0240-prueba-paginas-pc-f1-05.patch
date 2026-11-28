@@ -1,0 +1,271 @@
+diff --git a/ps2xTest/src/ps2_f1_opciones_juego_tests.cpp b/ps2xTest/src/ps2_f1_opciones_juego_tests.cpp
+index d5cec38..e29cc30 100644
+--- a/ps2xTest/src/ps2_f1_opciones_juego_tests.cpp
++++ b/ps2xTest/src/ps2_f1_opciones_juego_tests.cpp
+@@ -9,7 +9,8 @@
+ // that have an extension (the original runs first, through loadstring("", "=ps2x:<chunk>")), os.getenv (0x2AE880)
+ // answers the "ps2x:" keys with a number written like lua_pushnumber (0x29D4A0), and the menus' Lua heap (0x29B798)
+ // goes from 2 MB to 4 MB. F1_OPCIONES_JUEGO=0 turns all of it off. T5: the PC OPTIONS entry in OPTIONS and the pause's
+-// OPTIONS, and the fallbacks when a served chunk does not load.
++// OPTIONS, and the fallbacks when a served chunk does not load. T6-T7: DISPLAY SETTINGS hosts the PC pages (list,
++// graphics, display, settings), each page's body a chunk of its own; the heap's resume points and its fallback test.
+ namespace
+ {
+     using f1::opciones_juego::Argumentos;
+@@ -62,6 +63,22 @@ namespace
+ 
+     const std::string kEditProfile = "FrontEnd/Scripts/Profiles2005/EditProfile.lua";
+     const std::string kEditProfilePausa = "FrontEnd/Scripts/PauseMenu/Profiles2005_PAUSE/EditProfile.lua";
++    const std::string kPantalla = "FrontEnd/Scripts/Profiles2005/DisplaySettings.lua";
++    const std::string kPantallaPausa = "FrontEnd/Scripts/PauseMenu/Profiles2005_PAUSE/DisplaySettings.lua";
++
++    bool contiene(const char *texto, const std::string &trozo)
++    {
++        return texto != nullptr && std::string(texto).find(trozo) != std::string::npos;
++    }
++
++    // A page's body by its =ps2x: name, as the lua_load hook resolves it.
++    const char *cuerpo(const std::string &nombre)
++    {
++        std::string clave;
++        if (!f1::opciones_juego::nombreOriginal(nombre, clave))
++            return nullptr;
++        return f1::opciones_juego::cuerpoPagina(clave);
++    }
+ }
+ 
+ void register_ps2_f1_opciones_juego_tests()
+@@ -97,13 +114,192 @@ void register_ps2_f1_opciones_juego_tests()
+                          "frontend/scripts/profiles2005/editprofile.lua")) == opciones, "lower case");
+             t.IsTrue(f1::opciones_juego::extension(f1::opciones_juego::claveTrozo(kEditProfilePausa)) == opciones,
+                      "pause: FrontEnd/Scripts/PauseMenu/Profiles2005_PAUSE/EditProfile.lua");
++            t.IsTrue(f1::opciones_juego::extension(f1::opciones_juego::claveTrozo(kPantalla)) ==
++                         f1::opciones_juego::kExtensionPantalla,
++                     "DisplaySettings: the PC pages' host");
++            t.IsTrue(f1::opciones_juego::extension(f1::opciones_juego::claveTrozo(kPantallaPausa)) ==
++                         f1::opciones_juego::kExtensionPantalla,
++                     "pause DisplaySettings: the same host");
+             t.IsTrue(f1::opciones_juego::extension(f1::opciones_juego::claveTrozo(
+-                         "FrontEnd/Scripts/Profiles2005/DisplaySettings.lua")) == nullptr, "DisplaySettings: none yet");
+-            t.IsTrue(f1::opciones_juego::extension(f1::opciones_juego::claveTrozo(
+-                         "FrontEnd/Scripts/PauseMenu/Profiles2005_PAUSE/DisplaySettings.lua")) == nullptr,
+-                     "pause DisplaySettings: none yet");
++                         "FrontEnd/Scripts/Profiles2005/AudioSettings.lua")) == nullptr, "AudioSettings: none");
+             t.IsTrue(f1::opciones_juego::extension(f1::opciones_juego::claveTrozo("=ps2x:" + kEditProfile)) == nullptr,
+                      "the original's own name has no extension (no loop)");
++            t.IsTrue(f1::opciones_juego::extension("graficos-pc") == nullptr, "a page's body is no game chunk");
++        });
++
++        tc.Run("PC pages: each body served by its =ps2x: name; game chunks and unknown names have none", [](TestCase &t)
++        {
++            t.IsTrue(cuerpo("=ps2x:opciones-pc") == f1::opciones_juego::kPaginaOpcionesPc, "PC OPTIONS list");
++            t.IsTrue(cuerpo("=ps2x:graficos-pc") == f1::opciones_juego::kPaginaGraficosPc, "PC GRAPHICS");
++            t.IsTrue(cuerpo("=ps2x:ajustes-pc") == f1::opciones_juego::kPaginaAjustesPc, "PC SETTINGS");
++            t.IsTrue(cuerpo("=ps2x:pantalla-pc") == f1::opciones_juego::kPaginaPantallaPc, "PC DISPLAY");
++            t.IsTrue(cuerpo("=ps2x:GRAFICOS-PC") == f1::opciones_juego::kPaginaGraficosPc, "any case (claveTrozo)");
++            t.IsTrue(cuerpo("=ps2x:controles-pc") == nullptr, "F1 06's PC CONTROLS: not in F1 05");
++            t.IsTrue(cuerpo("=ps2x:juego-en-red") == nullptr, "F1 06's PC NETPLAY: not in F1 05");
++            t.IsTrue(cuerpo("=ps2x:" + kPantalla) == nullptr, "a game chunk's original is no page");
++            t.IsTrue(f1::opciones_juego::cuerpoPagina("") == nullptr, "empty");
++            const std::string host = f1::opciones_juego::kExtensionPantalla;
++            for (const char *nombre : {"=ps2x:opciones-pc", "=ps2x:graficos-pc", "=ps2x:ajustes-pc", "=ps2x:pantalla-pc"})
++                t.IsTrue(host.find(std::string("\"") + nombre + "\"") != std::string::npos,
++                         std::string("the host asks for ") + nombre);
++            t.IsTrue(contiene(f1::opciones_juego::kExtensionPantalla, "[1] = \"=ps2x:graficos-pc\", [2] = \"=ps2x:ajustes-pc\", "
++                                                                       "[3] = \"=ps2x:pantalla-pc\",\n    [5] = \"=ps2x:opciones-pc\""),
++                     "page numbers: 1 graphics, 2 settings, 3 display, 5 the list");
++        });
++
++        tc.Run("PC pages: the runtime options of pages 1-3 (only those F1 05's runtime applies), none for 0, 5 or others",
++               [](TestCase &t)
++        {
++            using V = std::vector<std::string>;
++            t.IsTrue(f1::opciones_juego::clavesPagina(1) ==
++                         V{"filtro", "supersampling", "alta_resolucion", "vsync", "pantalla"},
++                     "1 PC GRAPHICS");
++            t.IsTrue(f1::opciones_juego::clavesPagina(2) == V{"volumen", "latencia_audio", "audio_mono", "vibracion"},
++                     "2 PC SETTINGS");
++            t.IsTrue(f1::opciones_juego::clavesPagina(3) == V{"aspecto", "tamano_ventana", "gs"}, "3 PC DISPLAY");
++            t.IsTrue(f1::opciones_juego::clavesPagina(0).empty(), "0: the game's rows");
++            t.IsTrue(f1::opciones_juego::clavesPagina(5).empty(), "5: the list");
++            t.IsTrue(f1::opciones_juego::clavesPagina(4).empty(), "4: F1 06's NETPLAY, not here");
++            t.IsTrue(f1::opciones_juego::clavesPagina(6).empty(), "6: F1 06's CONTROLS, not here");
++            t.IsTrue(f1::opciones_juego::clavesPagina(-1).empty(), "negative");
++            const char *cuerpos[] = {nullptr, f1::opciones_juego::kPaginaGraficosPc, f1::opciones_juego::kPaginaAjustesPc,
++                                     f1::opciones_juego::kPaginaPantallaPc};
++            for (int pagina = 1; pagina <= 3; ++pagina)
++                for (const std::string &clave : f1::opciones_juego::clavesPagina(pagina))
++                    t.IsTrue(contiene(cuerpos[pagina], "lista, \"" + clave + "\""),
++                             "page " + std::to_string(pagina) + " has the row " + clave);
++            for (const char *fuera : {"fov", "hud", "detalle_coches", "distancia_circuito", "boton_", "cargas_rapidas",
++                                      "saltar_intro", "multinucleo", "red_", "dificultad_ia", "tecla_", "daltonismo",
++                                      "mostrar_fps"})
++                for (int pagina = 1; pagina <= 3; ++pagina)
++                    t.IsFalse(contiene(cuerpos[pagina], std::string("\"") + fuera),
++                              std::string(fuera) + " left out (needs game hooks F1 05 lacks, or a PC extra)");
++        });
++
++        tc.Run("PC pages: DEFAULT VALUES on each value page, sliders for volume and vibration, list entries open 1, 3, 2",
++               [](TestCase &t)
++        {
++            for (const char *pagina : {f1::opciones_juego::kPaginaGraficosPc, f1::opciones_juego::kPaginaAjustesPc,
++                                       f1::opciones_juego::kPaginaPantallaPc})
++                t.IsTrue(contiene(pagina, "A.defecto(lista, "), "DEFAULT VALUES row");
++            t.IsTrue(contiene(f1::opciones_juego::kExtensionPantalla, "G(\"ps2x:por_defecto\")\n        S.rehacer = true"),
++                     "DEFAULT VALUES resets the page's options and rebuilds it");
++            t.IsTrue(contiene(f1::opciones_juego::kPaginaAjustesPc, "A.deslizador(lista, \"volumen\""), "volume slider");
++            t.IsTrue(contiene(f1::opciones_juego::kPaginaAjustesPc, "A.deslizador(lista, \"vibracion\""),
++                     "vibration slider");
++            t.IsTrue(contiene(f1::opciones_juego::kExtensionPantalla, "G(\"ps2x:\" .. clave, math.floor(v * 100 + 0.5))"),
++                     "slider 0-1 to the runtime's 0-100");
++            t.IsTrue(contiene(f1::opciones_juego::kPaginaGraficosPc, "\"X16\", 16}},"), "SUPERSAMPLING values");
++            t.IsTrue(contiene(f1::opciones_juego::kPaginaGraficosPc,
++                              "the more work for the graphics card.\"), A.rehacer)"),
++                     "SUPERSAMPLING rebuilds the page (it may turn DOUBLE RESOLUTION off)");
++            t.IsTrue(contiene(f1::opciones_juego::kPaginaPantallaPc, "G(\"ps2x:ventanas\")"), "window sizes from the host");
++            t.IsTrue(contiene(f1::opciones_juego::kPaginaPantallaPc, "G(\"ps2x:gs_en_uso\") == 1"),
++                     "GS: the one not in use says ON RESTART");
++            const std::string lista = f1::opciones_juego::kPaginaOpcionesPc;
++            const size_t uno = lista.find("A.entrada(lista, 1, "), tres = lista.find("A.entrada(lista, 3, "),
++                         dos = lista.find("A.entrada(lista, 2, ");
++            t.IsTrue(uno != std::string::npos && tres != std::string::npos && dos != std::string::npos,
++                     "three entries: GRAPHICS, DISPLAY, SETTINGS");
++            t.IsTrue(uno < tres && tres < dos, "in that order");
++        });
++
++        tc.Run("PC pages: Spanish and English by the game's language, accents as decimal escapes, the game's ON/OFF",
++               [](TestCase &t)
++        {
++            t.IsTrue(contiene(f1::opciones_juego::kExtensionPantalla,
++                              "if game and game.language and game.language() == game.spanish then return es end"),
++                     "T(es, en) by game.language() at each call");
++            t.IsTrue(contiene(f1::opciones_juego::kExtensionPantalla, "{\"GR\\195\\129FICOS PC\", \"PC GRAPHICS\"}"),
++                     "titles in both languages, \\195\\129 = A acute");
++            t.IsTrue(contiene(f1::opciones_juego::kPaginaGraficosPc, "{{\"OFF\", 0}, {\"ON\", 1}}"), "the game's ON/OFF keys");
++            for (const char *pagina : {f1::opciones_juego::kPaginaOpcionesPc, f1::opciones_juego::kPaginaGraficosPc,
++                                       f1::opciones_juego::kPaginaAjustesPc, f1::opciones_juego::kPaginaPantallaPc,
++                                       f1::opciones_juego::kExtensionPantalla})
++            {
++                bool ascii = true;
++                for (const char *c = pagina; *c != '\0'; ++c)
++                    ascii = ascii && static_cast<unsigned char>(*c) < 0x80u;
++                t.IsTrue(ascii, "only ASCII in the Lua text (accents escaped)");
++                t.IsTrue(contiene(pagina, "T(\"") || contiene(pagina, "A.T("), "texts through T");
++            }
++        });
++
++        tc.Run("PC pages host: page 0 is the stock screen; X saves and Triangle discards on a value page", [](TestCase &t)
++        {
++            const char *e = f1::opciones_juego::kExtensionPantalla;
++            t.IsTrue(contiene(e, "self.mMenuObjects = S.objetos\n    self.mHelpText = S.ayuda\n    self.mMenuTitle = "
++                                 "S.titulo\n    self.mButtonAdjustFunc = S.botones\n    return activar(self)"),
++                     "page 0: the game's rows, help, title and buttons, then the game's onActivate");
++            t.IsTrue(contiene(e, "if not S.filas then return delJuego(self) end"), "no PC page: the stock screen");
++            t.IsTrue(contiene(e, "S = {objetos = M.mMenuObjects, ayuda = M.mHelpText, titulo = M.mMenuTitle, botones = "
++                                 "M.mButtonAdjustFunc"),
++                     "the game's own kept at load");
++            t.IsTrue(contiene(e, "G(\"ps2x:guardar\")\n    sfx.play(sfx.accept)\n    abrir(5, S.fila)"),
++                     "X on a value page: settings.ini, back to the list on its entry");
++            t.IsTrue(contiene(e, "M:revertValues()\n      G(\"ps2x:descartar\")"), "Triangle: revert and discard");
++            t.IsTrue(contiene(e, "if mio(a, b) then G(\"ps2x:pagina\", 0) end\n    return volver(a, b)"),
++                     "Triangle on the list: the stock Back (page 0 again)");
++            t.IsTrue(contiene(e, "if f and f[3] then"), "X on the list opens the entry's page");
++            t.IsTrue(contiene(e, "M:onDeactivate()\n    G(\"ps2x:pagina\", n)\n    S.cursor = cursor\n    M:onActivate()"),
++                     "a page opens in the same node");
++            t.IsTrue(contiene(e, "G(\"ps2x:abrir\")\n        G(\"ps2x:recordar\")"), "a value page takes F10/F11 and keeps");
++            t.IsTrue(contiene(e, "game.pausepad() == b"), "pause: only the pad that paused");
++            t.IsTrue(contiene(e, "pausa = M.onCustomRender ~= nil"), "pause told by its onCustomRender");
++            t.IsTrue(contiene(e, "onItemIncrease = trasCambiar(onItemIncrease)"), "arrows: rebuild when asked");
++        });
++
++        tc.Run("PC pages host: sliders get what gClassSlider.onInit sets (onActivate needs mInc), without its draw call",
++               [](TestCase &t)
++        {
++            const char *e = f1::opciones_juego::kExtensionPantalla;
++            t.IsTrue(contiene(e, "item.mMin = 0"), "mMin");
++            t.IsTrue(contiene(e, "item.mMax = 1"), "mMax");
++            t.IsTrue(contiene(e, "item.mInc = function(p) return p / 10 end"), "mInc: 10 % a step");
++            t.IsTrue(contiene(e, "item.mGetValStr = function(v) return string.format(\"%d%%\", math.floor(v * 100 + 0.5)) end"),
++                     "mGetValStr: the percentage");
++            t.IsTrue(contiene(e, "item.mVolumeGroup = sfx.volumesfx"), "the move sound's group");
++            t.IsFalse(contiene(e, "alphablend"), "no draw state changed from a handler");
++        });
++
++        tc.Run("PC pages host: a Lua error on a PC page is caught (no panic exit), logged, and the stock screen shown",
++               [](TestCase &t)
++        {
++            const char *e = f1::opciones_juego::kExtensionPantalla;
++            t.IsTrue(contiene(e, "pcall(filas, n)"), "building the rows");
++            t.IsTrue(contiene(e, "pcall(activar, self)"), "the game's onActivate over our rows");
++            t.IsTrue(contiene(e, "pcall(original, a, b)"), "arrows on a PC page");
++            t.IsTrue(contiene(e, "G(\"ps2x:error_letra\", string.byte(e, i))"), "the message, a character at a time");
++            t.IsTrue(contiene(e, "G(\"ps2x:error\", n)"), "then the page");
++            t.Equals(f1::opciones_juego::lineaErrorPagina(2, "[string \"=ps2x:ajustes-pc\"]:3: attempt to call field `mInc'"),
++                     std::string("[f1-05:opciones] pagina 2: error de Lua ([string \"=ps2x:ajustes-pc\"]:3: attempt to call "
++                                 "field `mInc'); se muestra la pantalla del juego"),
++                     "log line");
++            t.Equals(f1::opciones_juego::lineaErrorPagina(1, ""),
++                     std::string("[f1-05:opciones] pagina 1: error de Lua (sin mensaje); se muestra la pantalla del juego"),
++                     "no message");
++        });
++
++        tc.Run("PC pages host: cursor reset on page change, mLastUpdate kept on rebuild, never game.* writes",
++               [](TestCase &t)
++        {
++            const std::string e = f1::opciones_juego::kExtensionPantalla;
++            t.IsTrue(e.find("if n ~= S.ultima then\n      self.mCurrentMenuItem = 1") != std::string::npos,
++                     "first row when the page changes");
++            t.IsTrue(e.find("S.filas[k][1].mLastUpdate = antes[k][1].mLastUpdate") != std::string::npos,
++                     "a rebuilt row keeps the old one's mLastUpdate");
++            t.IsTrue(e.find("if S.filas and table.getn(S.filas) == 0 then S.filas = nil end") != std::string::npos,
++                     "a page that did not load (no rows): the stock screen, not an empty menu");
++            for (const char *texto : {f1::opciones_juego::kExtensionPantalla, f1::opciones_juego::kPaginaOpcionesPc,
++                                      f1::opciones_juego::kPaginaGraficosPc, f1::opciones_juego::kPaginaAjustesPc,
++                                      f1::opciones_juego::kPaginaPantallaPc})
++            {
++                std::string resto = texto;
++                for (const char *permitido : {"game.language", "game.spanish", "game.pausepad", "game and "})
++                    for (size_t p = resto.find(permitido); p != std::string::npos; p = resto.find(permitido))
++                        resto.erase(p, std::strlen(permitido));
++                t.IsTrue(resto.find("game.") == std::string::npos, "no game.* (the profile is never modified)");
++            }
+         });
+ 
+         tc.Run("PC OPTIONS entry: after goDisplaySettings, same outcome, page 5; DISPLAY SETTINGS page 0", [](TestCase &t)
+@@ -151,7 +347,8 @@ void register_ps2_f1_opciones_juego_tests()
+             t.Equals(f1::opciones_juego::pruebaRota(""), 0, "empty");
+             t.Equals(f1::opciones_juego::pruebaRota("1"), 1, "1");
+             t.Equals(f1::opciones_juego::pruebaRota("2"), 2, "2");
+-            t.Equals(f1::opciones_juego::pruebaRota("3"), 0, "3");
++            t.Equals(f1::opciones_juego::pruebaRota("3"), 3, "3: the heap's fallback");
++            t.Equals(f1::opciones_juego::pruebaRota("4"), 0, "4");
+             t.Equals(f1::opciones_juego::pruebaRota("on"), 0, "on");
+             t.Equals(std::string(f1::opciones_juego::kTextoRoto), std::string("\n) -- F1_OPCIONES_ROTAS=1\n"),
+                      "the syntax error appended");
+@@ -306,6 +503,26 @@ void register_ps2_f1_opciones_juego_tests()
+             t.Equals(f1::opciones_juego::tamanoMonton(0x00200000u, false), 0x00200000u, "options off: 2 MB");
+         });
+ 
++        tc.Run("Lua heap, F1_OPCIONES_ROTAS=3: the menus' heap asked with a size the game's malloc cannot give",
++               [](TestCase &t)
++        {
++            t.Equals(f1::opciones_juego::tamanoMonton(0x00200000u, true, 3), f1::opciones_juego::kMontonImposible,
++                     "menus: impossible size");
++            t.IsTrue(f1::opciones_juego::kMontonImposible > 0x01000000u, "more than half of the 32 MB guest RAM");
++            t.Equals(f1::opciones_juego::tamanoMonton(0x00100000u, true, 3), 0x00100000u, "race: as asked");
++            t.Equals(f1::opciones_juego::tamanoMonton(0x00200000u, false, 3), 0x00200000u, "options off: as asked");
++            t.Equals(f1::opciones_juego::tamanoMonton(0x00200000u, true, 1), 0x00400000u, "ROTAS=1: 4 MB");
++            t.Equals(f1::opciones_juego::tamanoMonton(0x00200000u, true, 0), 0x00400000u, "not set: 4 MB");
++        });
++
++        tc.Run("Lua heap: 0x29B798's four resume points are hooked too", [](TestCase &t)
++        {
++            const std::vector<uint32_t> puntos(std::begin(f1::opciones_juego::kMontonReanudar),
++                                               std::end(f1::opciones_juego::kMontonReanudar));
++            t.IsTrue(puntos == std::vector<uint32_t>{0x0029B7C8u, 0x0029B7D0u, 0x0029B7E0u, 0x0029B7F0u},
++                     "after 0x29C690, 0x1010E0, the malloc 0x23BFB8 and 0x29C618");
++        });
++
+         tc.Run("Lua heap granted: *0x41BC54 = heap object, buffer at +0 and size at +4", [](TestCase &t)
+         {
+             Ram ram;

@@ -1,0 +1,173 @@
+diff --git a/ps2xRuntime/src/lib/ps2_game_font.cpp b/ps2xRuntime/src/lib/ps2_game_font.cpp
+index 1a3d37f..0abd850 100644
+--- a/ps2xRuntime/src/lib/ps2_game_font.cpp
++++ b/ps2xRuntime/src/lib/ps2_game_font.cpp
+@@ -113,16 +113,22 @@ namespace ps2x
+         if (!r.has(0u, 8u))
+             return false;
+         GameFont out;
+-        out.lineHeight = static_cast<int>(r.u32(4u));
++        // F1 06's files start with a u32 0 and then the line height; F1 05's with the line height (its reader
++        // 0x2D2DE8 reads one word before the glyph page), and there a glyph without a pair adjustment page has 0 at
++        // +0x24 instead of -1 (odd/tasks/opciones-pc.md T9).
++        const bool f1_05 = r.u32(0u) != 0u;
++        const size_t pageAt = f1_05 ? 4u : 8u;
++        const uint32_t noPairPage = f1_05 ? 0u : 0xFFFFFFFFu;
++        out.lineHeight = static_cast<int>(r.u32(pageAt - 4u));
+         if (out.lineHeight <= 0 || out.lineHeight > 256)
+             return false;
+ 
+         // The glyph page.
+         uint32_t records = 0u;
+-        size_t at = skipPage(r, 8u, kGlyphRecord, records);
++        size_t at = skipPage(r, pageAt, kGlyphRecord, records);
+         if (at == 0u)
+             return false;
+-        const size_t glyphsAt = 8u + kPageHeader + size_t(records) * 4u;
++        const size_t glyphsAt = pageAt + kPageHeader + size_t(records) * 4u;
+         struct Raw
+         {
+             uint32_t code;
+@@ -137,7 +143,7 @@ namespace ps2x
+             raw.push_back({r.u32(g) & 0xFFFFu, r.f32(g + 4u), r.f32(g + 8u), r.f32(g + 12u), r.f32(g + 24u),
+                            r.f32(g + 28u), r.f32(g + 32u)});
+             // Its pair adjustment page (not used: the pen moves by the advance).
+-            if (static_cast<int32_t>(r.u32(g + 0x24u)) != -1)
++            if (r.u32(g + 0x24u) != noPairPage)
+             {
+                 uint32_t pairs = 0u;
+                 at = skipPage(r, at, kPairRecord, pairs);
+diff --git a/ps2xRuntime/src/lib/ps2_game_font.h b/ps2xRuntime/src/lib/ps2_game_font.h
+index 19ddeb6..83a7e3e 100644
+--- a/ps2xRuntime/src/lib/ps2_game_font.h
++++ b/ps2xRuntime/src/lib/ps2_game_font.h
+@@ -11,10 +11,11 @@
+ // game reads it from the user's disc (func_264888 in src/f1_overrides.cpp); nothing of the game goes in the package.
+ //
+ // The .bft format (little endian), as the game's reader func_264888 takes it:
+-//   u32 0, u32 line height in pixels
++//   u32 0, u32 line height in pixels (F1 05's, read by its 0x2D2DE8: only the u32 line height)
+ //   glyph page: 7 u32 (count, count, first = 2, last, 'A', -1, last), (count + 2) u32 (the tool's pointers, unused),
+ //     (count + 2) glyphs of 0x48 bytes: u32 code (low 16 bits: the Unicode character, Latin-1 and a few more),
+-//     8 float (width, height, u0, u1, v0, v1, advance, x offset), 8 int32 (+0x24: its pair adjustment page or -1),
++//     8 float (width, height, u0, u1, v0, v1, advance, x offset), 8 int32 (+0x24: its pair adjustment page or -1;
++//     F1 05: or 0),
+ //     u32 (+0x44, low byte: 0 for a glyph, 1 for the two sentinels at 0 and 1)
+ //   for every glyph with a pair adjustment page: 7 u32 (n, ...), (n + 2) u32, (n + 2) records of 0x28 bytes
+ //   the texture, as the GS packets that load it: A+D (BITBLTBUF, TRXPOS, TRXREG, TRXDIR) and an IMAGE GIF tag, first
+@@ -72,9 +73,13 @@ namespace ps2x
+     size_t loadGameFileCache(const std::filesystem::path &folder);
+     // The game's letters the notices use, from the smallest to the largest: the menus' (italic Eurostile) and the race
+     // HUD's (straight Frutiger; the position tower and "Current" use fruitigerMedium: 9 row capitals in the 512 row
+-    // frame, 12-13 rows in a 720 row window, logs/aspecto-t2/carrera-torre-x3.png).
+-    inline constexpr std::string_view kMenuFontFiles[] = {"Fonts/eurostyleSmallPx.bft", "Fonts/eurostyleMediumPx.bft",
+-                                                          "Fonts/eurostyleLargePx.bft"};
++    // frame, 12-13 rows in a 720 row window, logs/aspecto-t2/carrera-torre-x3.png). F1 05's menus use Futura
++    // (Frontend/Fonts/Futurah*Px.bft, odd/tasks/opciones-pc.md T9); each game reads only its own, so one list serves
++    // both (the size is chosen among the ones read).
++    inline constexpr std::string_view kMenuFontFiles[] = {"Fonts/eurostyleSmallPx.bft",     "Fonts/eurostyleMediumPx.bft",
++                                                          "Fonts/eurostyleLargePx.bft",     "Frontend/Fonts/Futurah12Px.bft",
++                                                          "Frontend/Fonts/Futurah14Px.bft", "Frontend/Fonts/Futurah18Px.bft",
++                                                          "Frontend/Fonts/Futurah28Px.bft"};
+     inline constexpr std::string_view kRaceFontFiles[] = {"Fonts/fruitigerTiny.bft", "Fonts/fruitigerSmall.bft",
+                                                           "Fonts/fruitigerMedium.bft", "Fonts/fruitigerLarge.bft"};
+     inline constexpr std::string_view kRaceTowerFontFile = "Fonts/fruitigerMedium.bft";
+diff --git a/ps2xTest/src/ps2_game_font_tests.cpp b/ps2xTest/src/ps2_game_font_tests.cpp
+index 6ca1d1b..f9691a5 100644
+--- a/ps2xTest/src/ps2_game_font_tests.cpp
++++ b/ps2xTest/src/ps2_game_font_tests.cpp
+@@ -13,6 +13,7 @@
+ #include <iterator>
+ #include <limits>
+ #include <string>
++#include <string_view>
+ #include <vector>
+ 
+ // Aspecto T2-T3: the game's letters (.bft) for the host's notices and the "50 FPS" counter. The samples are built here
+@@ -96,12 +97,15 @@ namespace
+         out.insert(out.end(), data.begin(), data.end());
+     }
+ 
+-    std::vector<uint8_t> sampleFont()
++    // f1_05: F1 05's layout (odd/tasks/opciones-pc.md T9, its reader 0x2D2DE8): the file starts with the line height
++    // (no u32 0 before it) and a glyph's +0x24 is 0 without a pair adjustment page (F1 06: -1).
++    std::vector<uint8_t> sampleFont(bool f1_05 = false)
+     {
+         const std::vector<SampleGlyph> &glyphs = sampleGlyphs();
+         const uint32_t count = static_cast<uint32_t>(glyphs.size()), records = count + 2u;
+         std::vector<uint8_t> out;
+-        put32(out, 0u);
++        if (!f1_05)
++            put32(out, 0u);
+         put32(out, kLineHeight);
+         for (uint32_t v : {count, count, 2u, count + 1u, 0x41u, 0xFFFFFFFFu, count + 1u})
+             put32(out, v);
+@@ -124,7 +128,8 @@ namespace
+             putFloat(out, 1.0f - g.y / float(kAtlasHeight));
+             putFloat(out, g.advance);
+             putFloat(out, g.offsetX);
+-            for (int v : {g.pairPage < 0 ? -1 : 0, 1, -1, 2, -1, 1, -2, 1})
++            const int pair = f1_05 ? (g.pairPage < 0 ? 0 : 0x00A45000) : (g.pairPage < 0 ? -1 : 0);
++            for (int v : {pair, 1, -1, 2, -1, 1, -2, 1})
+                 put32(out, static_cast<uint32_t>(v));
+             put32(out, 0x00FFFF00u);
+         }
+@@ -266,6 +271,58 @@ void register_ps2_game_font_tests()
+             t.IsFalse(decode(noise, font), "noise");
+         });
+ 
++        tc.Run("an F1 05 .bft: the line height first, pair pages where +0x24 is not 0; the same glyphs and atlas",
++               [](TestCase &t)
++        {
++            ps2x::GameFont f105, f106;
++            t.IsTrue(decode(sampleFont(true), f105), "F1 05's layout decodes");
++            t.IsTrue(decode(sampleFont(), f106), "F1 06's still does");
++            t.Equals(f105.lineHeight, kLineHeight, "line height (the first word)");
++            t.Equals(f105.glyphs.size(), sampleGlyphs().size(), "every glyph (the pair pages skipped)");
++            for (const SampleGlyph &s : sampleGlyphs())
++            {
++                const ps2x::GameFontGlyph *a = f105.glyph(s.codepoint), *b = f106.glyph(s.codepoint);
++                t.IsTrue(a != nullptr && b != nullptr && a->x == b->x && a->y == b->y && a->width == b->width &&
++                             a->height == b->height && a->advance == b->advance && a->offsetX == b->offsetX,
++                         "glyph " + std::to_string(s.codepoint) + " as in F1 06's layout");
++            }
++            t.IsTrue(f105.width == f106.width && f105.height == f106.height && f105.rgba == f106.rgba, "the same atlas");
++            t.IsTrue(f105.inkTop == f106.inkTop && f105.inkBottom == f106.inkBottom, "the same ink rows");
++
++            const std::vector<uint8_t> whole = sampleFont(true);
++            int accepted = 0;
++            for (size_t size = 0; size < whole.size(); ++size)
++            {
++                ps2x::GameFont font;
++                font.lineHeight = 77;
++                if (ps2x::decodeGameFont(whole.data(), size, font) || font.lineHeight != 77 || !font.glyphs.empty())
++                    ++accepted;
++            }
++            t.Equals(accepted, 0, "every cut of an F1 05 file refused, font untouched");
++        });
++
++        tc.Run("the menus' letters: F1 06's Eurostile and F1 05's Futura (Frontend/Fonts/Futurah*Px.bft)", [](TestCase &t)
++        {
++            auto menu = [](std::string_view name)
++            {
++                for (std::string_view file : ps2x::kMenuFontFiles)
++                    if (file == name)
++                        return true;
++                return false;
++            };
++            for (const char *name : {"Fonts/eurostyleSmallPx.bft", "Fonts/eurostyleMediumPx.bft",
++                                     "Fonts/eurostyleLargePx.bft", "Frontend/Fonts/Futurah12Px.bft",
++                                     "Frontend/Fonts/Futurah14Px.bft", "Frontend/Fonts/Futurah18Px.bft",
++                                     "Frontend/Fonts/Futurah28Px.bft"})
++            {
++                t.IsTrue(menu(name), std::string("a menus' letter: ") + name);
++                t.IsTrue(ps2x::gameFileCacheName(name), std::string("and a game file name: ") + name);
++            }
++            t.Equals(std::size(ps2x::kMenuFontFiles), size_t(7u), "no other");
++            for (std::string_view file : ps2x::kRaceFontFiles)
++                t.IsFalse(menu(file), std::string("the race HUD's are not: ") + std::string(file));
++        });
++
+         tc.Run("the font files the game read: by name, with a version that changes with the bytes", [](TestCase &t)
+         {
+             std::vector<uint8_t> bytes;

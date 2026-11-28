@@ -1,0 +1,260 @@
+diff --git a/ps2xTest/CMakeLists.txt b/ps2xTest/CMakeLists.txt
+index 35e9c07..151ae3d 100644
+--- a/ps2xTest/CMakeLists.txt
++++ b/ps2xTest/CMakeLists.txt
+@@ -55,6 +55,7 @@ add_library(ps2_test_lib STATIC
+     src/ps2_lua_traza_tests.cpp
+     src/ps2_f1_panoramica_tests.cpp
+     src/ps2_f1_lua_volcado_tests.cpp
++    src/ps2_f1_opciones_juego_tests.cpp
+ )
+ 
+ target_include_directories(ps2_test_lib PRIVATE
+diff --git a/ps2xTest/src/main.cpp b/ps2xTest/src/main.cpp
+index 250fe99..9589bd7 100644
+--- a/ps2xTest/src/main.cpp
++++ b/ps2xTest/src/main.cpp
+@@ -36,6 +36,7 @@ void register_ps2_fallo_tests();
+ void register_ps2_lua_traza_tests();
+ void register_ps2_f1_panoramica_tests();
+ void register_ps2_f1_lua_volcado_tests();
++void register_ps2_f1_opciones_juego_tests();
+ void reset_ps2_test_function_table();
+ 
+ int main()
+@@ -76,6 +77,7 @@ int main()
+     register_ps2_lua_traza_tests();
+     register_ps2_f1_panoramica_tests();
+     register_ps2_f1_lua_volcado_tests();
++    register_ps2_f1_opciones_juego_tests();
+     int res = MiniTest::Run();
+     std::cout.flush();
+     std::cerr.flush();
+diff --git a/ps2xTest/src/ps2_f1_opciones_juego_tests.cpp b/ps2xTest/src/ps2_f1_opciones_juego_tests.cpp
+new file mode 100644
+index 0000000..1c611a6
+--- /dev/null
++++ b/ps2xTest/src/ps2_f1_opciones_juego_tests.cpp
+@@ -0,0 +1,222 @@
++#include "MiniTest.h"
++#include "../../../../src/f1_opciones_juego.h" // F1 05's src/, the header its f1_overrides.cpp uses
++
++#include <cstring>
++#include <string>
++#include <vector>
++
++// odd/tasks/opciones-pc.md T4 (S1, S4): the lua_load hook (0x29DEF8) serves a text chunk in place of the game's chunks
++// that have an extension (the original runs first, through loadstring("", "=ps2x:<chunk>")), os.getenv (0x2AE880)
++// answers the "ps2x:" keys with a number written like lua_pushnumber (0x29D4A0), and the menus' Lua heap (0x29B798)
++// goes from 2 MB to 4 MB. F1_OPCIONES_JUEGO=0 turns all of it off.
++namespace
++{
++    using f1::opciones_juego::Argumentos;
++
++    constexpr uint32_t kL = 0x00100000u;     // lua_State
++    constexpr uint32_t kBase = 0x00200000u;  // L->base (+12)
++    constexpr uint32_t kCadena = 0x00300000u; // TString of the first argument
++
++    struct Ram
++    {
++        std::vector<uint8_t> bytes = std::vector<uint8_t>(PS2_RAM_SIZE, 0u);
++
++        void escribir32(uint32_t direccion, uint32_t valor)
++        {
++            std::memcpy(bytes.data() + direccion, &valor, sizeof(valor));
++        }
++
++        void escribirFloat(uint32_t direccion, float valor)
++        {
++            std::memcpy(bytes.data() + direccion, &valor, sizeof(valor));
++        }
++
++        uint32_t leer32(uint32_t direccion) const
++        {
++            uint32_t valor = 0;
++            std::memcpy(&valor, bytes.data() + direccion, sizeof(valor));
++            return valor;
++        }
++
++        float leerFloat(uint32_t direccion) const
++        {
++            float valor = 0.0f;
++            std::memcpy(&valor, bytes.data() + direccion, sizeof(valor));
++            return valor;
++        }
++
++        // os.getenv's stack: L->top (+8) and L->base (+12), the key as a string TObject {4, TString*} (text at +16 of
++        // the TString) and, if given, a second argument TObject {tipo, valor}.
++        void pila(const std::string &clave, int argumentos, uint32_t tipo2 = 3u, float valor = 0.0f)
++        {
++            escribir32(kL + 12u, kBase);
++            escribir32(kL + 8u, kBase + 8u * static_cast<uint32_t>(argumentos));
++            escribir32(kBase, 4u);
++            escribir32(kBase + 4u, kCadena);
++            std::memcpy(bytes.data() + kCadena + 16u, clave.c_str(), clave.size() + 1u);
++            escribir32(kBase + 8u, tipo2);
++            escribirFloat(kBase + 12u, valor);
++        }
++    };
++
++    const std::string kEditProfile = "FrontEnd/Scripts/Profiles2005/EditProfile.lua";
++}
++
++void register_ps2_f1_opciones_juego_tests()
++{
++    MiniTest::Case("F1OpcionesJuego", [](TestCase &tc)
++    {
++        tc.Run("F1_OPCIONES_JUEGO: on by default, 0 turns it off", [](TestCase &t)
++        {
++            t.IsTrue(f1::opciones_juego::activas(nullptr), "not set: on");
++            t.IsTrue(f1::opciones_juego::activas(""), "empty: on");
++            t.IsTrue(f1::opciones_juego::activas("1"), "1: on");
++            t.IsFalse(f1::opciones_juego::activas("0"), "0: off");
++        });
++
++        tc.Run("chunk key: '\\' as '/', no leading '@' or '/', lower case", [](TestCase &t)
++        {
++            t.Equals(f1::opciones_juego::claveTrozo(kEditProfile),
++                     std::string("frontend/scripts/profiles2005/editprofile.lua"), "F1 05's FrontEnd/ name");
++            t.Equals(f1::opciones_juego::claveTrozo("@Frontend\\Scripts\\Init\\Language.lua"),
++                     std::string("frontend/scripts/init/language.lua"), "@ and backslashes");
++            t.Equals(f1::opciones_juego::claveTrozo("/frontend/scripts/x.lua"), std::string("frontend/scripts/x.lua"),
++                     "leading slash");
++        });
++
++        tc.Run("extension table: EditProfile in any case has the test extension, the rest none", [](TestCase &t)
++        {
++            const char *prueba = f1::opciones_juego::extension(f1::opciones_juego::claveTrozo(kEditProfile));
++            t.IsTrue(prueba != nullptr, "FrontEnd/Scripts/Profiles2005/EditProfile.lua");
++            t.IsTrue(prueba == f1::opciones_juego::kExtensionPrueba, "it is the bridge test");
++            t.IsTrue(f1::opciones_juego::extension(f1::opciones_juego::claveTrozo(
++                         "Frontend/Scripts/Profiles2005/EditProfile.lua")) == prueba, "Frontend/");
++            t.IsTrue(f1::opciones_juego::extension(f1::opciones_juego::claveTrozo(
++                         "frontend/scripts/profiles2005/editprofile.lua")) == prueba, "lower case");
++            t.IsTrue(f1::opciones_juego::extension(f1::opciones_juego::claveTrozo(
++                         "FrontEnd/Scripts/PauseMenu/Profiles2005_PAUSE/EditProfile.lua")) == nullptr, "pause: none yet");
++            t.IsTrue(f1::opciones_juego::extension(f1::opciones_juego::claveTrozo(
++                         "FrontEnd/Scripts/Profiles2005/DisplaySettings.lua")) == nullptr, "DisplaySettings: none yet");
++            t.IsTrue(f1::opciones_juego::extension(f1::opciones_juego::claveTrozo("=ps2x:" + kEditProfile)) == nullptr,
++                     "the original's own name has no extension (no loop)");
++        });
++
++        tc.Run("test extension: reads ps2x:vsync and sends it back as ps2x:prueba", [](TestCase &t)
++        {
++            const std::string texto = f1::opciones_juego::kExtensionPrueba;
++            t.IsTrue(texto.find("G(\"ps2x:prueba\", G(\"ps2x:vsync\"))") != std::string::npos, "round trip call");
++            t.IsTrue(texto.find("local G = os.getenv") != std::string::npos, "through os.getenv");
++        });
++
++        tc.Run("original's name: =ps2x:<chunk> gives the chunk's key, anything else is not one", [](TestCase &t)
++        {
++            std::string clave;
++            t.IsTrue(f1::opciones_juego::nombreOriginal("=ps2x:" + kEditProfile, clave), "=ps2x: name");
++            t.Equals(clave, std::string("frontend/scripts/profiles2005/editprofile.lua"), "normalised key");
++            clave = "sin tocar";
++            t.IsFalse(f1::opciones_juego::nombreOriginal(kEditProfile, clave), "the game's name");
++            t.Equals(clave, std::string("sin tocar"), "key unchanged when it is not one");
++            t.IsFalse(f1::opciones_juego::nombreOriginal("=ps2x:", clave), "empty chunk name");
++            t.IsFalse(f1::opciones_juego::nombreOriginal("=PS2X:" + kEditProfile, clave), "the prefix is exact");
++        });
++
++        tc.Run("served text: runs the original by its =ps2x: name in the chunk's environment, then the extension",
++               [](TestCase &t)
++        {
++            t.Equals(f1::opciones_juego::textoConExtension(kEditProfile, "print(1)\n"),
++                     std::string("-- F1 05 (PC): FrontEnd/Scripts/Profiles2005/EditProfile.lua del juego y las opciones "
++                                 "del PC\n"
++                                 "local ps2x_original = loadstring(\"\", \"=ps2x:FrontEnd/Scripts/Profiles2005/"
++                                 "EditProfile.lua\")\n"
++                                 "if ps2x_original then setfenv(ps2x_original, getfenv(1)) ps2x_original() end\n"
++                                 "ps2x_original = nil\n"
++                                 "print(1)\n"),
++                     "whole text");
++            const std::string raro = f1::opciones_juego::textoConExtension("a\"b\\c", "");
++            t.IsTrue(raro.find("loadstring(\"\", \"=ps2x:a\\\"b\\\\c\")") != std::string::npos,
++                     "quotes and backslashes escaped in the Lua literal");
++        });
++
++        tc.Run("os.getenv arguments: ps2x: key alone, with a number, with something else", [](TestCase &t)
++        {
++            Ram ram;
++            Argumentos a;
++            ram.pila("ps2x:vsync", 1);
++            t.IsTrue(f1::opciones_juego::leerArgumentos(ram.bytes.data(), kL, a), "ps2x: key");
++            t.Equals(a.clave, std::string("vsync"), "key without the prefix");
++            t.IsFalse(a.conValor, "no second argument");
++
++            ram.pila("ps2x:pagina", 2, 3u, 5.0f);
++            a = {};
++            t.IsTrue(f1::opciones_juego::leerArgumentos(ram.bytes.data(), kL, a), "key and number");
++            t.Equals(a.clave, std::string("pagina"), "key");
++            t.IsTrue(a.conValor, "with a value");
++            t.Equals(a.valor, 5.0f, "the number");
++
++            ram.pila("ps2x:pagina", 2, 4u, 5.0f);
++            a = {};
++            t.IsTrue(f1::opciones_juego::leerArgumentos(ram.bytes.data(), kL, a), "key and a string");
++            t.IsFalse(a.conValor, "a second argument that is not a number is no value");
++
++            ram.pila("ps2x:", 1);
++            t.IsTrue(f1::opciones_juego::leerArgumentos(ram.bytes.data(), kL, a), "bare prefix is a bridge key");
++            t.Equals(a.clave, std::string(""), "empty key");
++        });
++
++        tc.Run("os.getenv arguments: other keys, no arguments or a non-string go to the game", [](TestCase &t)
++        {
++            Ram ram;
++            Argumentos a;
++            ram.pila("HOME", 1);
++            t.IsFalse(f1::opciones_juego::leerArgumentos(ram.bytes.data(), kL, a), "another key");
++            ram.pila("ps2:vsync", 1);
++            t.IsFalse(f1::opciones_juego::leerArgumentos(ram.bytes.data(), kL, a), "almost the prefix");
++            ram.pila("ps2x:vsync", 0);
++            t.IsFalse(f1::opciones_juego::leerArgumentos(ram.bytes.data(), kL, a), "no arguments");
++            ram.pila("ps2x:vsync", 1);
++            ram.escribir32(kBase, 3u);
++            t.IsFalse(f1::opciones_juego::leerArgumentos(ram.bytes.data(), kL, a), "first argument a number");
++        });
++
++        tc.Run("result: TObject at L->top like lua_pushnumber (type 3, float at +4), nil as type 0, top + 8",
++               [](TestCase &t)
++        {
++            Ram ram;
++            ram.pila("ps2x:vsync", 1);
++            const uint32_t top = kBase + 8u;
++            ram.escribir32(top + 8u, 0xDEADBEEFu);
++            f1::opciones_juego::escribirResultado(ram.bytes.data(), kL, true, 2.5f);
++            t.Equals(ram.leer32(top), 3u, "type number");
++            t.Equals(ram.leerFloat(top + 4u), 2.5f, "value");
++            t.Equals(ram.leer32(kL + 8u), top + 8u, "L->top advanced by one TObject");
++            t.Equals(ram.leer32(top + 8u), 0xDEADBEEFu, "nothing written past the TObject");
++            t.Equals(ram.leer32(kL + 12u), kBase, "L->base unchanged");
++
++            f1::opciones_juego::escribirResultado(ram.bytes.data(), kL, false, 7.0f);
++            t.Equals(ram.leer32(top + 8u), 0u, "nil");
++            t.Equals(ram.leer32(kL + 8u), top + 16u, "L->top advanced again");
++        });
++
++        tc.Run("Lua heap: the menus' 2 MB becomes 4 MB; other sizes, and with the options off, as asked", [](TestCase &t)
++        {
++            t.Equals(f1::opciones_juego::tamanoMonton(0x00200000u, true), 0x00400000u, "menus: 4 MB");
++            t.Equals(f1::opciones_juego::tamanoMonton(0x00100000u, true), 0x00100000u, "race: 1 MB as asked");
++            t.Equals(f1::opciones_juego::tamanoMonton(0x00080000u, true), 0x00080000u, "boot 512 KB as asked");
++            t.Equals(f1::opciones_juego::tamanoMonton(0u, true), 0u, "0 (destroy only) as asked");
++            t.Equals(f1::opciones_juego::tamanoMonton(0x00200000u, false), 0x00200000u, "options off: 2 MB");
++        });
++
++        tc.Run("Lua heap granted: *0x41BC54 = heap object, buffer at +0 and size at +4", [](TestCase &t)
++        {
++            Ram ram;
++            t.Equals(f1::opciones_juego::leerMonton(ram.bytes.data()).objeto, 0u, "no heap");
++            ram.escribir32(f1::opciones_juego::kPunteroMonton, 0x00500000u);
++            ram.escribir32(0x00500000u, 0x00A00000u);
++            ram.escribir32(0x00500004u, 0x00400000u);
++            const f1::opciones_juego::Monton m = f1::opciones_juego::leerMonton(ram.bytes.data());
++            t.Equals(m.objeto, 0x00500000u, "object");
++            t.Equals(m.bufer, 0x00A00000u, "buffer");
++            t.Equals(m.tamano, 0x00400000u, "size");
++        });
++    });
++}

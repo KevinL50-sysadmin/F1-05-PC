@@ -1,0 +1,161 @@
+diff --git a/ps2xTest/src/ps2_f1_opciones_juego_tests.cpp b/ps2xTest/src/ps2_f1_opciones_juego_tests.cpp
+index 1c611a6..d5cec38 100644
+--- a/ps2xTest/src/ps2_f1_opciones_juego_tests.cpp
++++ b/ps2xTest/src/ps2_f1_opciones_juego_tests.cpp
+@@ -8,7 +8,8 @@
+ // odd/tasks/opciones-pc.md T4 (S1, S4): the lua_load hook (0x29DEF8) serves a text chunk in place of the game's chunks
+ // that have an extension (the original runs first, through loadstring("", "=ps2x:<chunk>")), os.getenv (0x2AE880)
+ // answers the "ps2x:" keys with a number written like lua_pushnumber (0x29D4A0), and the menus' Lua heap (0x29B798)
+-// goes from 2 MB to 4 MB. F1_OPCIONES_JUEGO=0 turns all of it off.
++// goes from 2 MB to 4 MB. F1_OPCIONES_JUEGO=0 turns all of it off. T5: the PC OPTIONS entry in OPTIONS and the pause's
++// OPTIONS, and the fallbacks when a served chunk does not load.
+ namespace
+ {
+     using f1::opciones_juego::Argumentos;
+@@ -60,6 +61,7 @@ namespace
+     };
+ 
+     const std::string kEditProfile = "FrontEnd/Scripts/Profiles2005/EditProfile.lua";
++    const std::string kEditProfilePausa = "FrontEnd/Scripts/PauseMenu/Profiles2005_PAUSE/EditProfile.lua";
+ }
+ 
+ void register_ps2_f1_opciones_juego_tests()
+@@ -84,28 +86,126 @@ void register_ps2_f1_opciones_juego_tests()
+                      "leading slash");
+         });
+ 
+-        tc.Run("extension table: EditProfile in any case has the test extension, the rest none", [](TestCase &t)
++        tc.Run("extension table: OPTIONS and the pause's OPTIONS (any case) have the PC OPTIONS entry, the rest none",
++               [](TestCase &t)
+         {
+-            const char *prueba = f1::opciones_juego::extension(f1::opciones_juego::claveTrozo(kEditProfile));
+-            t.IsTrue(prueba != nullptr, "FrontEnd/Scripts/Profiles2005/EditProfile.lua");
+-            t.IsTrue(prueba == f1::opciones_juego::kExtensionPrueba, "it is the bridge test");
+-            t.IsTrue(f1::opciones_juego::extension(f1::opciones_juego::claveTrozo(
+-                         "Frontend/Scripts/Profiles2005/EditProfile.lua")) == prueba, "Frontend/");
++            const char *opciones = f1::opciones_juego::extension(f1::opciones_juego::claveTrozo(kEditProfile));
++            t.IsTrue(opciones == f1::opciones_juego::kExtensionOpciones, "FrontEnd/Scripts/Profiles2005/EditProfile.lua");
+             t.IsTrue(f1::opciones_juego::extension(f1::opciones_juego::claveTrozo(
+-                         "frontend/scripts/profiles2005/editprofile.lua")) == prueba, "lower case");
++                         "Frontend/Scripts/Profiles2005/EditProfile.lua")) == opciones, "Frontend/");
+             t.IsTrue(f1::opciones_juego::extension(f1::opciones_juego::claveTrozo(
+-                         "FrontEnd/Scripts/PauseMenu/Profiles2005_PAUSE/EditProfile.lua")) == nullptr, "pause: none yet");
++                         "frontend/scripts/profiles2005/editprofile.lua")) == opciones, "lower case");
++            t.IsTrue(f1::opciones_juego::extension(f1::opciones_juego::claveTrozo(kEditProfilePausa)) == opciones,
++                     "pause: FrontEnd/Scripts/PauseMenu/Profiles2005_PAUSE/EditProfile.lua");
+             t.IsTrue(f1::opciones_juego::extension(f1::opciones_juego::claveTrozo(
+                          "FrontEnd/Scripts/Profiles2005/DisplaySettings.lua")) == nullptr, "DisplaySettings: none yet");
++            t.IsTrue(f1::opciones_juego::extension(f1::opciones_juego::claveTrozo(
++                         "FrontEnd/Scripts/PauseMenu/Profiles2005_PAUSE/DisplaySettings.lua")) == nullptr,
++                     "pause DisplaySettings: none yet");
+             t.IsTrue(f1::opciones_juego::extension(f1::opciones_juego::claveTrozo("=ps2x:" + kEditProfile)) == nullptr,
+                      "the original's own name has no extension (no loop)");
+         });
+ 
+-        tc.Run("test extension: reads ps2x:vsync and sends it back as ps2x:prueba", [](TestCase &t)
++        tc.Run("PC OPTIONS entry: after goDisplaySettings, same outcome, page 5; DISPLAY SETTINGS page 0", [](TestCase &t)
++        {
++            const std::string texto = f1::opciones_juego::kExtensionOpciones;
++            auto tiene = [&](const char *trozo) { return texto.find(trozo) != std::string::npos; };
++            t.IsTrue(tiene("v == \"goDisplaySettings\""), "finds DISPLAY SETTINGS by its outcome");
++            t.IsTrue(tiene("pc.p = k + 1"), "right after it");
++            t.IsTrue(tiene("{titulo, \"goDisplaySettings\", nota, true, function() G(\"ps2x:pagina\", 5) end}"),
++                     "the same outcome and a callback asking for page 5");
++            t.IsTrue(tiene("G(\"ps2x:pagina\", 0)\n        if llamada then return llamada(m) end"),
++                     "DISPLAY SETTINGS' callback wrapped: page 0, then the original");
++            t.IsTrue(tiene("\"mMenuTextItems\", \"mMenuOutcomeItems\", \"mHelpText\", \"mMenuSelectableItems\", "
++                           "\"mMenuCallbackItems\""),
++                     "the five tables");
++            t.IsTrue(tiene("local titulo = \"PC OPTIONS\""), "English title");
++            t.IsTrue(tiene("titulo = \"OPCIONES PC\""), "Spanish title");
++            t.IsTrue(tiene("game.language() == game.spanish"), "by the game's language");
++            t.IsTrue(texto.find("game.language()") > texto.find("local function poner()"),
++                     "the language is read at each activation, not at load (it is chosen after boot)");
++            t.IsTrue(tiene("G(\"ps2x:prueba\", G(\"ps2x:vsync\"))"), "T4's bridge check kept");
++        });
++
++        tc.Run("PC OPTIONS entry: out of the tables while customActivate runs, back once in onActivate", [](TestCase &t)
++        {
++            const std::string texto = f1::opciones_juego::kExtensionOpciones;
++            auto tiene = [&](const char *trozo) { return texto.find(trozo) != std::string::npos; };
++            t.IsTrue(tiene("M.customActivate = function(m)\n    quitar()\n    return activar(m)\n  end"),
++                     "customActivate: the entry out first, so its writes at 5 and 6 remove the game's entries");
++            t.IsTrue(tiene("M.onActivate = function(m)\n    poner()\n    return activa(m)\n  end"),
++                     "onActivate (ReActivateMenu rebuilds from the tables): the entry back in");
++            t.IsTrue(tiene("if pc.p then return end"), "never twice");
++            t.IsTrue(tiene("while t[f] ~= nil do f = f + 1 end"), "each table shifted only up to its first hole");
++            t.IsTrue(tiene("while i < f do t[i] = t[i + 1] i = i + 1 end\n    t[f] = nil"),
++                     "taken out by the exact inverse");
++            t.IsTrue(tiene("M.mCurrentMenuItem == 7 and o and o.outcome ~= \"fucked\""),
++                     "onSelect's item 7 (2-player CHANGE CONTROLLER) only for that entry");
++            t.IsTrue(texto.find("table.insert") == std::string::npos,
++                     "no table.insert (table.getn is not safe with holes)");
++        });
++
++        tc.Run("F1_OPCIONES_ROTAS: 1 breaks the extension, 2 drops the originals, anything else nothing", [](TestCase &t)
++        {
++            t.Equals(f1::opciones_juego::pruebaRota(nullptr), 0, "not set");
++            t.Equals(f1::opciones_juego::pruebaRota(""), 0, "empty");
++            t.Equals(f1::opciones_juego::pruebaRota("1"), 1, "1");
++            t.Equals(f1::opciones_juego::pruebaRota("2"), 2, "2");
++            t.Equals(f1::opciones_juego::pruebaRota("3"), 0, "3");
++            t.Equals(f1::opciones_juego::pruebaRota("on"), 0, "on");
++            t.Equals(std::string(f1::opciones_juego::kTextoRoto), std::string("\n) -- F1_OPCIONES_ROTAS=1\n"),
++                     "the syntax error appended");
++        });
++
++        tc.Run("=ps2x: load without the original: a text that does not compile, not an empty function", [](TestCase &t)
+         {
+-            const std::string texto = f1::opciones_juego::kExtensionPrueba;
+-            t.IsTrue(texto.find("G(\"ps2x:prueba\", G(\"ps2x:vsync\"))") != std::string::npos, "round trip call");
+-            t.IsTrue(texto.find("local G = os.getenv") != std::string::npos, "through os.getenv");
++            t.Equals(f1::opciones_juego::textoSinOriginal("=ps2x:" + kEditProfile),
++                     std::string("-- F1 05 (PC): no se guardo el original de =ps2x:FrontEnd/Scripts/Profiles2005/"
++                                 "EditProfile.lua\n@ps2x_sin_original\n"),
++                     "comment and an unexpected symbol");
++            t.Equals(f1::opciones_juego::textoSinOriginal("a\nb"),
++                     std::string("-- F1 05 (PC): no se guardo el original de a b\n@ps2x_sin_original\n"),
++                     "a line break in the name cannot end the comment");
++        });
++
++        tc.Run("log lines of a chunk that does not load", [](TestCase &t)
++        {
++            t.Equals(f1::opciones_juego::lineaExtensionNoCarga(kEditProfile, "x:3: '=' expected near 'y'"),
++                     std::string("[f1-05:opciones] extension de FrontEnd/Scripts/Profiles2005/EditProfile.lua no carga: "
++                                 "x:3: '=' expected near 'y'; se usa el original"),
++                     "served text: the original is loaded instead");
++            t.Equals(f1::opciones_juego::lineaNoCarga("=ps2x:" + kEditProfile, "m"),
++                     std::string("[f1-05:opciones] =ps2x:FrontEnd/Scripts/Profiles2005/EditProfile.lua no carga: m"),
++                     "any other");
++        });
++
++        tc.Run("Lua error after a failed lua_load: the string at L->top - 8, popped once", [](TestCase &t)
++        {
++            Ram ram;
++            ram.pila("ps2x:x", 1); // L->base and one TObject: a string
++            const std::string error = "[string \"=ps2x:a\"]:2:\tunexpected symbol near '@'";
++            std::memcpy(ram.bytes.data() + kCadena + 16u, error.c_str(), error.size() + 1u);
++            std::string mensaje = "antes";
++            t.IsTrue(f1::opciones_juego::mensajeDeError(ram.bytes.data(), kL, mensaje), "string on top");
++            t.Equals(mensaje, std::string("[string \"=ps2x:a\"]:2: unexpected symbol near '@'"),
++                     "its text, the tab as a space");
++
++            const std::string largo(400, 'x');
++            std::memcpy(ram.bytes.data() + kCadena + 16u, largo.c_str(), largo.size() + 1u);
++            t.IsTrue(f1::opciones_juego::mensajeDeError(ram.bytes.data(), kL, mensaje), "long string");
++            t.Equals(mensaje.size(), f1::opciones_juego::kLargoMensaje, "cut at kLargoMensaje");
++
++            ram.escribir32(kBase, 3u);
++            mensaje = "antes";
++            t.IsFalse(f1::opciones_juego::mensajeDeError(ram.bytes.data(), kL, mensaje), "a number is no message");
++            t.Equals(mensaje, std::string("antes"), "message unchanged");
++
++            f1::opciones_juego::quitarCima(ram.bytes.data(), kL);
++            t.Equals(ram.leer32(kL + 8u), kBase, "L->top back by one TObject");
++            t.IsFalse(f1::opciones_juego::mensajeDeError(ram.bytes.data(), kL, mensaje), "empty stack: no message");
++            f1::opciones_juego::quitarCima(ram.bytes.data(), kL);
++            t.Equals(ram.leer32(kL + 8u), kBase, "empty stack: L->top unchanged");
++            t.Equals(ram.leer32(kL + 12u), kBase, "L->base unchanged");
+         });
+ 
+         tc.Run("original's name: =ps2x:<chunk> gives the chunk's key, anything else is not one", [](TestCase &t)

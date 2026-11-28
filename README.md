@@ -21,9 +21,9 @@ in for the PS2 hardware (EE, IOP, VU1, SPU2) and draws the GS graphics on your g
 [paraLLEl-GS](https://github.com/Arntzen-Software/parallel-gs) (Vulkan).
 
 The goal is **the original PS2 game, as it is on the console**: the last season of V10 engines, with the full game
-and its modes. There are no PC extras inside the game: no new options in its menus, no photo mode, no online play.
-What the port adds is only what a PC needs: a window or full screen, rendering on your graphics card, controllers,
-keyboard and wheel, and settings in a file (or on the game's page in RecompLauncher).
+and its modes. What the port adds is what a PC needs: a window or full screen, rendering on your graphics card,
+controllers, keyboard and wheel, and PC settings, both inside the game's own menus (**PC OPTIONS**) and in a file (or on
+the game's page in RecompLauncher). There is no photo mode and no online play.
 
 ## Highlights
 
@@ -103,10 +103,17 @@ Dump your own disc: the project will never tell you where to download a game ima
 - Controller, keyboard or wheel. Buttons and keys are set in `config\controls.ini`, which is explained inside.
 - **F11** switches between window and full screen, **F10** changes the aspect ratio (4:3, 16:9, console pixels).
 - Close the window (X or Alt+F4) to quit.
+- **PC OPTIONS** sits right below DISPLAY SETTINGS in the game's options menu (edit profile options) and in the pause
+  menu's options. It has three pages, built with the game's own menus: PC GRAPHICS (scaling filter, supersampling,
+  double resolution, V-Sync, FPS counter, screen mode), PC DISPLAY (picture shape, window size, graphics renderer)
+  and PC SETTINGS (volume, audio latency, mono, vibration strength, field of view). Each page has a DEFAULT VALUES
+  row; X confirms and saves to `config\settings.ini`, Triangle undoes the changes. These settings never touch your
+  memory card profile.
 - The PC settings (window mode and size, aspect ratio, scaling filter, supersampling, double resolution, V-Sync, FPS
-  counter, volume, audio latency and mono, vibration strength, graphics renderer) are in `config\settings.ini`, each
-  one explained inside (in Spanish). Delete the file to go back to the defaults. With RecompLauncher you can change
-  them on the game's page.
+  counter in the game's own font, volume, audio latency and mono, vibration strength, field of view of the race
+  cameras, graphics renderer) are in
+  `config\settings.ini`, each one explained inside (in Spanish). Delete the file to go back to the defaults. With
+  RecompLauncher you can change them on the game's page.
 
 ## Where everything is
 
@@ -145,9 +152,9 @@ The project ships no game data, no ISO and no BIOS, and is not a commercial prod
 game you own is treated differently from country to country, so check your local law. If you are a rights holder and
 have a concern, please open an issue at https://github.com/KevinL50-sysadmin/F1-05-PC/issues.
 
-**Will it get PC options in the game's menus, a photo mode or online play?**
-Not for now. F1 05 PC is meant to be the original game as it was on the PS2; the PC settings live in
-`config\settings.ini` and on the game's page in RecompLauncher.
+**Will it get more PC options, a photo mode or online play?**
+The PC OPTIONS in the game's menus will grow over time (field of view, button mapping and more are planned). A photo
+mode and online play are not planned for now.
 
 **Is this an emulator?**
 No. An emulator interprets the PS2 program while it runs; here the game's code was translated to C++ and compiled
@@ -244,10 +251,10 @@ Outline (Windows, from the project root):
 **F1 05 PC** convierte la edición europea de PlayStation 2 de *Formula One 05* (PAL, SCES-53033) en un programa nativo
 de Windows. No es un emulador que lee el disco: el código MIPS del juego se traduce de antemano a C++ con PS2Recomp y
 se compila en un `.exe` normal, con un runtime que hace de hardware de la PS2 y dibuja los gráficos en tu tarjeta
-gráfica con paraLLEl-GS (Vulkan). El objetivo es **el juego original de PS2, tal como es en la consola**, sin extras
-de PC dentro del juego (ni opciones nuevas en sus menús, ni modo foto, ni juego en red). Solo añade lo que necesita un
-PC: ventana o pantalla completa, dibujo por GPU, mando, teclado y volante, y opciones en un archivo (o en la ficha de
-RecompLauncher).
+gráfica con paraLLEl-GS (Vulkan). El objetivo es **el juego original de PS2, tal como es en la consola**. Añade
+lo que necesita un PC: ventana o pantalla completa, dibujo por GPU, mando, teclado y volante, y opciones de PC dentro de
+los menús del propio juego (**OPCIONES PC**) y en un archivo (o en la ficha de RecompLauncher). No tiene modo foto ni
+juego en red.
 
 **Funciones:** 50 fps como el original PAL; dibujo por GPU (paraLLEl-GS, Vulkan) con supersampling y doble
 resolución, o por CPU de respaldo; ventana, sin bordes o pantalla completa; aspecto 4:3, 16:9 o píxeles de la consola;
@@ -276,9 +283,12 @@ distribuye.
 **Controles y opciones:** mando, teclado o volante, con vibración; botones y teclas en `config\controls.ini`. F11
 pantalla completa o ventana, F10 aspecto (4:3, 16:9, píxeles de la consola). Para salir, cierra la ventana. Las
 opciones de PC (ventana, tamaño, aspecto, filtro de escalado, supersampling, doble resolución, sincronización
-vertical, contador de FPS, volumen, latencia y mono del sonido, vibración y dibujo por GPU o CPU) están en
-`config\settings.ini`, explicadas dentro; bórralo para volver a las de serie. Con RecompLauncher se cambian en la ficha
-del juego.
+vertical, contador de FPS con la letra del juego, volumen, latencia y mono del sonido, vibración, campo de visión de
+las cámaras de la carrera y dibujo por GPU o CPU) están en `config\settings.ini`, explicadas dentro; bórralo para
+volver a las de serie. Con RecompLauncher se cambian en la ficha del juego. Dentro del juego, **OPCIONES PC** está
+justo debajo de OPCIONES DE PANTALLA, en el menú de opciones del perfil y en el de la pausa, con tres páginas
+(GRÁFICOS PC, con el contador de FPS; PANTALLA PC y AJUSTES PC, con el campo de visión); ✕ confirma y guarda, △
+deshace.
 
 **Dónde está todo:** en la portable, todo dentro de la carpeta del juego (`data\`, `config\`, `saves\mc0` y
 `saves\mc1`, `logs\`, `cache\`). Instalado: opciones y partidas en `Documentos\Mis juegos\F1-05`, y el log y la caché en
